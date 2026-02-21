@@ -104,6 +104,11 @@ export class ChannelManager {
             type: ChannelType.GuildText,
             parent: this.category,
             topic: `Claude Code session: ${sessionName}`,
+            permissionOverwrites: [
+              { id: this.guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
+              { id: this.userId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+              ...(this.client.user ? [{ id: this.client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ReadMessageHistory] }] : []),
+            ],
           });
           channelName = nameToTry;
           break;

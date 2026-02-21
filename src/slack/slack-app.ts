@@ -256,6 +256,9 @@ export function createSlackApp(config: SlackConfig) {
     // Ignore thread replies (we want top-level messages only)
     if ('thread_ts' in message && message.thread_ts) return;
 
+    // Only allow the configured user to send input
+    if ('user' in message && message.user !== config.userId) return;
+
     const sessionId = channelManager.getSessionByChannel(message.channel);
     if (!sessionId) return; // Not a session channel
 
@@ -306,6 +309,10 @@ export function createSlackApp(config: SlackConfig) {
   // Slash command: /background - Send Ctrl+B to put Claude in background mode
   app.command('/background', async ({ command, ack, respond }) => {
     await ack();
+    if (command.user_id !== config.userId) {
+      await respond(':warning: You are not authorized to use this command.');
+      return;
+    }
 
     const sessionId = channelManager.getSessionByChannel(command.channel_id);
     if (!sessionId) {
@@ -320,7 +327,7 @@ export function createSlackApp(config: SlackConfig) {
     }
 
     // Send Ctrl+B (ASCII 2)
-    const sent = sessionManager.sendInput(sessionId, '\x02');
+    const sent = sessionManager.sendInput(sessionId, '\x02', true);
     if (sent) {
       await respond(':arrow_heading_down: Sent background command (Ctrl+B)');
     } else {
@@ -331,6 +338,10 @@ export function createSlackApp(config: SlackConfig) {
   // Slash command: /interrupt - Send Escape to interrupt Claude
   app.command('/interrupt', async ({ command, ack, respond }) => {
     await ack();
+    if (command.user_id !== config.userId) {
+      await respond(':warning: You are not authorized to use this command.');
+      return;
+    }
 
     const sessionId = channelManager.getSessionByChannel(command.channel_id);
     if (!sessionId) {
@@ -345,7 +356,7 @@ export function createSlackApp(config: SlackConfig) {
     }
 
     // Send Escape (ASCII 27)
-    const sent = sessionManager.sendInput(sessionId, '\x1b');
+    const sent = sessionManager.sendInput(sessionId, '\x1b', true);
     if (sent) {
       await respond(':stop_sign: Sent interrupt (Escape)');
     } else {
@@ -356,6 +367,10 @@ export function createSlackApp(config: SlackConfig) {
   // Slash command: /mode - Send Shift+Tab to toggle mode
   app.command('/mode', async ({ command, ack, respond }) => {
     await ack();
+    if (command.user_id !== config.userId) {
+      await respond(':warning: You are not authorized to use this command.');
+      return;
+    }
 
     const sessionId = channelManager.getSessionByChannel(command.channel_id);
     if (!sessionId) {
@@ -370,7 +385,7 @@ export function createSlackApp(config: SlackConfig) {
     }
 
     // Send Shift+Tab (ESC [ Z)
-    const sent = sessionManager.sendInput(sessionId, '\x1b[Z');
+    const sent = sessionManager.sendInput(sessionId, '\x1b[Z', true);
     if (sent) {
       await respond(':arrows_counterclockwise: Sent mode toggle (Shift+Tab)');
     } else {
@@ -381,6 +396,10 @@ export function createSlackApp(config: SlackConfig) {
   // Slash command: /compact - Send /compact to compact the conversation
   app.command('/compact', async ({ command, ack, respond }) => {
     await ack();
+    if (command.user_id !== config.userId) {
+      await respond(':warning: You are not authorized to use this command.');
+      return;
+    }
 
     const sessionId = channelManager.getSessionByChannel(command.channel_id);
     if (!sessionId) {
@@ -405,6 +424,10 @@ export function createSlackApp(config: SlackConfig) {
   // Slash command: /model - Switch Claude model
   app.command('/model', async ({ command, ack, respond }) => {
     await ack();
+    if (command.user_id !== config.userId) {
+      await respond(':warning: You are not authorized to use this command.');
+      return;
+    }
 
     const sessionId = channelManager.getSessionByChannel(command.channel_id);
     if (!sessionId) {
@@ -418,9 +441,14 @@ export function createSlackApp(config: SlackConfig) {
       return;
     }
 
+    const ALLOWED_MODELS = ['opus', 'sonnet', 'haiku'];
     const modelArg = command.text.trim();
     if (!modelArg) {
       await respond('Usage: `/model <opus|sonnet|haiku>`');
+      return;
+    }
+    if (!ALLOWED_MODELS.includes(modelArg.toLowerCase())) {
+      await respond(`:warning: Invalid model. Choose from: ${ALLOWED_MODELS.join(', ')}`);
       return;
     }
 

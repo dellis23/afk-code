@@ -1,9 +1,14 @@
 import { randomUUID } from 'crypto';
 import { homedir } from 'os';
+import { join } from 'path';
+import { readFile } from 'fs/promises';
 import { createConnection, type Socket } from 'net';
 import * as pty from 'node-pty';
+import { sanitizePtyInput, isRawControlSequence } from '../utils/sanitize.js';
 
-const DAEMON_SOCKET = '/tmp/afk-code-daemon.sock';
+const AFK_CODE_DIR = join(homedir(), '.afk-code');
+const DAEMON_SOCKET = join(AFK_CODE_DIR, 'daemon.sock');
+const DAEMON_SECRET_PATH = join(AFK_CODE_DIR, 'daemon.secret');
 
 // Get Claude's project directory for the current working directory
 function getClaudeProjectDir(cwd: string): string {
@@ -12,12 +17,23 @@ function getClaudeProjectDir(cwd: string): string {
   return `${homedir()}/.claude/projects/${encodedPath}`;
 }
 
+// Read the shared secret for daemon authentication
+async function readDaemonSecret(): Promise<string | null> {
+  try {
+    const secret = await readFile(DAEMON_SECRET_PATH, 'utf-8');
+    return secret.trim();
+  } catch {
+    return null;
+  }
+}
+
 // Connect to daemon and maintain bidirectional communication
 function connectToDaemon(
   sessionId: string,
   projectDir: string,
   cwd: string,
   command: string[],
+  secret: string,
   onInput: (text: string) => void
 ): Promise<{ close: () => void } | null> {
   return new Promise((resolve) => {
@@ -25,7 +41,7 @@ function connectToDaemon(
     let messageBuffer = '';
 
     socket.on('connect', () => {
-      // Tell daemon about this session
+      // Tell daemon about this session (include secret for authentication)
       socket.write(JSON.stringify({
         type: 'session_start',
         id: sessionId,
@@ -33,6 +49,7 @@ function connectToDaemon(
         cwd,
         command,
         name: command.join(' '),
+        secret,
       }) + '\n');
 
       resolve({
@@ -54,7 +71,10 @@ function connectToDaemon(
         try {
           const msg = JSON.parse(line);
           if (msg.type === 'input' && msg.text) {
-            onInput(msg.text);
+            // Defense-in-depth: sanitize input before writing to PTY,
+            // unless it's a raw control sequence (escape sequences, single control chars)
+            const text = isRawControlSequence(msg.text) ? msg.text : sanitizePtyInput(msg.text);
+            onInput(text);
           }
         } catch {}
       }
@@ -101,15 +121,19 @@ export async function run(command: string[]): Promise<void> {
     env: process.env as Record<string, string>,
   });
 
-  const daemon = await connectToDaemon(
+  // Read daemon secret for authentication
+  const secret = await readDaemonSecret();
+
+  const daemon = secret ? await connectToDaemon(
     sessionId,
     projectDir,
     cwd,
     command,
+    secret,
     (text) => {
       ptyProcess.write(text);
     }
-  );
+  ) : null;
 
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);

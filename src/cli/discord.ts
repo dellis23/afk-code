@@ -86,14 +86,14 @@ Now let's collect your credentials:
   }
 
   // Save configuration
-  await mkdir(CONFIG_DIR, { recursive: true });
+  await mkdir(CONFIG_DIR, { recursive: true, mode: 0o700 });
 
   const envContent = `# AFK Code Discord Configuration
 DISCORD_BOT_TOKEN=${botToken}
 DISCORD_USER_ID=${userId}
 `;
 
-  await writeFile(DISCORD_CONFIG_FILE, envContent);
+  await writeFile(DISCORD_CONFIG_FILE, envContent, { mode: 0o600 });
   console.log(`
 ✓ Configuration saved to ${DISCORD_CONFIG_FILE}
 

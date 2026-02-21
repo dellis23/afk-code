@@ -70,14 +70,14 @@ Step 2: Get Your Chat ID
   }
 
   // Save configuration
-  await mkdir(CONFIG_DIR, { recursive: true });
+  await mkdir(CONFIG_DIR, { recursive: true, mode: 0o700 });
 
   const envContent = `# AFK Code Telegram Configuration
 TELEGRAM_BOT_TOKEN=${botToken}
 TELEGRAM_CHAT_ID=${chatId}
 `;
 
-  await writeFile(TELEGRAM_CONFIG_FILE, envContent);
+  await writeFile(TELEGRAM_CONFIG_FILE, envContent, { mode: 0o600 });
 
   console.log(`
 Configuration saved to ${TELEGRAM_CONFIG_FILE}

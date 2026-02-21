@@ -86,7 +86,7 @@ Now let's collect your tokens:
   }
 
   // Save configuration
-  await mkdir(CONFIG_DIR, { recursive: true });
+  await mkdir(CONFIG_DIR, { recursive: true, mode: 0o700 });
 
   const envContent = `# AFK Code Slack Configuration
 SLACK_BOT_TOKEN=${botToken}
@@ -94,7 +94,7 @@ SLACK_APP_TOKEN=${appToken}
 SLACK_USER_ID=${userId}
 `;
 
-  await writeFile(SLACK_CONFIG_FILE, envContent);
+  await writeFile(SLACK_CONFIG_FILE, envContent, { mode: 0o600 });
   console.log(`
 ✓ Configuration saved to ${SLACK_CONFIG_FILE}
 

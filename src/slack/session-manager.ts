@@ -4,12 +4,17 @@
  */
 
 import { watch, type FSWatcher } from 'fs';
-import { readdir, readFile, stat, unlink, mkdir } from 'fs/promises';
+import { readdir, readFile, stat, unlink, mkdir, writeFile } from 'fs/promises';
 import { createServer, type Server, type Socket } from 'net';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
+import { homedir } from 'os';
+import { join } from 'path';
 import type { TodoItem } from '../types.js';
+import { sanitizePtyInput } from '../utils/sanitize.js';
 
-const DAEMON_SOCKET = '/tmp/afk-code-daemon.sock';
+const AFK_CODE_DIR = join(homedir(), '.afk-code');
+export const DAEMON_SOCKET = join(AFK_CODE_DIR, 'daemon.sock');
+export const DAEMON_SECRET_PATH = join(AFK_CODE_DIR, 'daemon.secret');
 
 export interface SessionInfo {
   id: string;
@@ -70,12 +75,20 @@ export class SessionManager {
   private claimedFiles = new Set<string>();
   private events: SessionEvents;
   private server: Server | null = null;
+  private sharedSecret: string = '';
 
   constructor(events: SessionEvents) {
     this.events = events;
   }
 
   async start(): Promise<void> {
+    // Ensure ~/.afk-code directory exists with restricted permissions
+    await mkdir(AFK_CODE_DIR, { recursive: true, mode: 0o700 });
+
+    // Generate shared secret for socket authentication
+    this.sharedSecret = randomBytes(32).toString('hex');
+    await writeFile(DAEMON_SECRET_PATH, this.sharedSecret, { mode: 0o600 });
+
     // Remove old socket file
     try {
       await unlink(DAEMON_SOCKET);
@@ -134,16 +147,19 @@ export class SessionManager {
     }
   }
 
-  sendInput(sessionId: string, text: string): boolean {
+  sendInput(sessionId: string, text: string, raw?: boolean): boolean {
     const session = this.sessions.get(sessionId);
     if (!session) {
       console.error(`[SessionManager] Session not found: ${sessionId}`);
       return false;
     }
 
+    // Sanitize input unless raw mode is requested (for control sequences)
+    const sanitizedText = raw ? text : sanitizePtyInput(text);
+
     // Send text first, then Enter
     try {
-      session.socket.write(JSON.stringify({ type: 'input', text }) + '\n');
+      session.socket.write(JSON.stringify({ type: 'input', text: sanitizedText }) + '\n');
     } catch (err) {
       console.error(`[SessionManager] Failed to send input to ${sessionId}:`, err);
       // Socket is dead, clean up
@@ -191,6 +207,12 @@ export class SessionManager {
   private async handleSessionMessage(socket: Socket, message: any): Promise<void> {
     switch (message.type) {
       case 'session_start': {
+        // Validate shared secret
+        if (!message.secret || message.secret !== this.sharedSecret) {
+          socket.write(JSON.stringify({ type: 'error', message: 'Authentication failed: invalid secret' }) + '\n');
+          return;
+        }
+
         // Snapshot existing JSONL files before creating session
         const initialFileStats = await this.snapshotJsonlFiles(message.projectDir);
 

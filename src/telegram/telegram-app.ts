@@ -361,7 +361,7 @@ export function createTelegramApp(config: TelegramConfig) {
           await ctx.reply('No active session.');
           return;
         }
-        const sent = sessionManager.sendInput(targetSession.sessionId, '\x02');
+        const sent = sessionManager.sendInput(targetSession.sessionId, '\x02', true);
         await ctx.reply(sent ? 'Sent background command (Ctrl+B)' : 'Failed - session not connected.');
         break;
       }
@@ -372,7 +372,7 @@ export function createTelegramApp(config: TelegramConfig) {
           await ctx.reply('No active session.');
           return;
         }
-        const sent = sessionManager.sendInput(targetSession.sessionId, '\x1b');
+        const sent = sessionManager.sendInput(targetSession.sessionId, '\x1b', true);
         await ctx.reply(sent ? 'Sent interrupt (Escape)' : 'Failed - session not connected.');
         break;
       }
@@ -382,7 +382,7 @@ export function createTelegramApp(config: TelegramConfig) {
           await ctx.reply('No active session.');
           return;
         }
-        const sent = sessionManager.sendInput(targetSession.sessionId, '\x1b[Z');
+        const sent = sessionManager.sendInput(targetSession.sessionId, '\x1b[Z', true);
         await ctx.reply(sent ? 'Sent mode toggle (Shift+Tab)' : 'Failed - session not connected.');
         break;
       }
@@ -402,9 +402,14 @@ export function createTelegramApp(config: TelegramConfig) {
           await ctx.reply('No active session.');
           return;
         }
+        const ALLOWED_MODELS = ['opus', 'sonnet', 'haiku'];
         const modelArg = args.slice(targetSession === getSessionByName(args[0] || '') ? 1 : 0).join(' ');
         if (!modelArg) {
           await ctx.reply('Usage: `/model <opus|sonnet|haiku>`', { parse_mode: 'Markdown' });
+          return;
+        }
+        if (!ALLOWED_MODELS.includes(modelArg.toLowerCase())) {
+          await ctx.reply(`Invalid model. Choose from: ${ALLOWED_MODELS.join(', ')}`);
           return;
         }
         const sent = sessionManager.sendInput(targetSession.sessionId, `/model ${modelArg}\n`);

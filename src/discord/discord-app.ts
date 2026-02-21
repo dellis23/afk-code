@@ -5,6 +5,8 @@ import { ChannelManager } from './channel-manager.js';
 import { markdownToSlack, chunkMessage, formatSessionStatus, formatTodos } from '../slack/message-formatter.js';
 import { extractImagePaths } from '../utils/image-extractor.js';
 
+export const ALLOWED_MODELS = ['opus', 'sonnet', 'haiku'];
+
 export function createDiscordApp(config: DiscordConfig) {
   const client = new Client({
     intents: [
@@ -245,6 +247,9 @@ export function createDiscordApp(config: DiscordConfig) {
     // Ignore DMs
     if (!message.guild) return;
 
+    // Only allow the configured user to send input
+    if (message.author.id !== config.userId) return;
+
     const sessionId = channelManager.getSessionByChannel(message.channelId);
     if (!sessionId) return; // Not a session channel
 
@@ -312,6 +317,12 @@ export function createDiscordApp(config: DiscordConfig) {
   client.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
 
+    // Only allow the configured user to use slash commands
+    if (interaction.user.id !== config.userId) {
+      await interaction.reply({ content: '\u26a0\ufe0f You are not authorized to use this command.', ephemeral: true });
+      return;
+    }
+
     const { commandName, channelId } = interaction;
 
     if (commandName === 'sessions') {
@@ -356,7 +367,7 @@ export function createDiscordApp(config: DiscordConfig) {
         message = '🔄 Sent mode toggle (Shift+Tab)';
       }
 
-      const sent = sessionManager.sendInput(sessionId, key);
+      const sent = sessionManager.sendInput(sessionId, key, true);
       if (sent) {
         await interaction.reply(message);
       } else {
@@ -399,6 +410,10 @@ export function createDiscordApp(config: DiscordConfig) {
       }
 
       const modelArg = interaction.options.getString('name', true);
+      if (!ALLOWED_MODELS.includes(modelArg.toLowerCase())) {
+        await interaction.reply(`⚠️ Invalid model. Choose from: ${ALLOWED_MODELS.join(', ')}`);
+        return;
+      }
       const sent = sessionManager.sendInput(sessionId, `/model ${modelArg}\n`);
       if (sent) {
         await interaction.reply(`🧠 Sent /model ${modelArg}`);
