@@ -455,7 +455,12 @@ export class SessionManager {
         if (initialMtime !== undefined && mtime > initialMtime) {
           // Existing file that was modified after session start (--continue case)
           if (await this.hasConversationMessages(path)) {
-            console.log(`[SessionManager] Found modified JSONL (--continue): ${path}`);
+            // Re-check claimedFiles after the async gap — another session may
+            // have claimed this file while we were awaiting I/O above.
+            if (this.claimedFiles.has(path)) continue;
+            // Claim atomically before returning to prevent races
+            this.claimedFiles.add(path);
+            console.log(`[SessionManager] Session ${session.id}: claimed modified JSONL (--continue): ${path}`);
             return path;
           }
         }
@@ -468,7 +473,11 @@ export class SessionManager {
         if (initialMtime === undefined) {
           // New file that didn't exist when session started
           if (await this.hasConversationMessages(path)) {
-            console.log(`[SessionManager] Found new JSONL: ${path}`);
+            // Re-check after async gap
+            if (this.claimedFiles.has(path)) continue;
+            // Claim atomically before returning to prevent races
+            this.claimedFiles.add(path);
+            console.log(`[SessionManager] Session ${session.id}: claimed new JSONL: ${path}`);
             return path;
           }
         }
@@ -553,11 +562,10 @@ export class SessionManager {
 
     if (jsonlFile) {
       session.watchedFile = jsonlFile;
-      this.claimedFiles.add(jsonlFile);
-      console.log(`[SessionManager] Watching: ${jsonlFile}`);
+      console.log(`[SessionManager] Session ${session.id}: watching ${jsonlFile}`);
       await this.processJsonlUpdates(session);
     } else {
-      console.log(`[SessionManager] Waiting for JSONL changes in ${session.projectDir}`);
+      console.log(`[SessionManager] Session ${session.id}: waiting for JSONL in ${session.projectDir}`);
     }
 
     // Watch directory for changes - create it if it doesn't exist yet
@@ -569,10 +577,11 @@ export class SessionManager {
         if (filename.startsWith('agent-')) return;
 
         if (!session.watchedFile) {
+          // Re-check after the guard — another callback may have set it
           const newFile = await this.findActiveJsonlFile(session);
-          if (newFile) {
+          if (newFile && !session.watchedFile) {
             session.watchedFile = newFile;
-            this.claimedFiles.add(newFile);
+            console.log(`[SessionManager] Session ${session.id}: watching ${newFile}`);
           }
         }
 
@@ -594,9 +603,9 @@ export class SessionManager {
 
       if (!session.watchedFile) {
         const newFile = await this.findActiveJsonlFile(session);
-        if (newFile) {
+        if (newFile && !session.watchedFile) {
           session.watchedFile = newFile;
-          this.claimedFiles.add(newFile);
+          console.log(`[SessionManager] Session ${session.id}: watching ${newFile} (poll)`);
         }
       }
 

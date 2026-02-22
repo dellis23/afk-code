@@ -6,6 +6,7 @@
 import { createServer } from 'http';
 import { stat } from 'fs/promises';
 import { randomUUID } from 'crypto';
+import { homedir } from 'os';
 import { SessionManager } from '../slack/session-manager.js';
 import { chunkMessage, formatSessionStatus, formatTodos } from '../slack/message-formatter.js';
 
@@ -155,9 +156,27 @@ export function createMockDiscordApp(port: number) {
 
         channelCounter++;
         const channelId = `mock-chan-${channelCounter}`;
-        channels.set(channelId, { id: channelId, name });
+        const home = homedir();
+        const sessionId = randomUUID().slice(0, 8);
+
+        channels.set(channelId, { id: channelId, name, topic: home, sessionId });
+        channelToSession.set(channelId, sessionId);
+        sessionToChannel.set(sessionId, channelId);
+
         console.log(`[mock-discord] Channel created: #${name} (${channelId})`);
-        return json(res, 200, { channelId, name });
+        console.log(`[mock-discord] Auto-spawning session ${sessionId} in ${home}`);
+
+        try {
+          await sessionManager.spawnSession(sessionId, home);
+          return json(res, 200, { channelId, name, sessionId, cwd: home });
+        } catch (err: any) {
+          // Clean up on failure
+          channels.get(channelId)!.sessionId = undefined;
+          channelToSession.delete(channelId);
+          sessionToChannel.delete(sessionId);
+          console.error(`[mock-discord] Failed to spawn session: ${err.message || err}`);
+          return json(res, 200, { channelId, name, error: `Failed to auto-spawn: ${err.message || err}` });
+        }
       }
 
       if (req.method === 'POST' && url === '/change-topic') {
@@ -169,9 +188,6 @@ export function createMockDiscordApp(port: number) {
         const channel = channels.get(channelId);
         if (!channel) {
           return json(res, 404, { error: 'Channel not found' });
-        }
-        if (channel.sessionId) {
-          return json(res, 400, { error: 'Channel already has a session (one-shot)' });
         }
 
         const cwd = topic.trim().replace(/\/+$/, '') || '/';
@@ -185,18 +201,30 @@ export function createMockDiscordApp(port: number) {
           return json(res, 400, { error: `Path does not exist: ${cwd}` });
         }
 
+        // Kill existing session for this channel if any
+        const oldSessionId = channel.sessionId;
+        if (oldSessionId) {
+          console.log(`[mock-discord] Killing existing session ${oldSessionId} for #${channel.name}`);
+          sessionToChannel.delete(oldSessionId);
+          channelToSession.delete(channelId);
+          sessionManager.killSession(oldSessionId);
+          channel.sessionId = undefined;
+          // Brief pause for cleanup
+          await new Promise(r => setTimeout(r, 500));
+        }
+
         const sessionId = randomUUID().slice(0, 8);
         channel.topic = cwd;
         channel.sessionId = sessionId;
         channelToSession.set(channelId, sessionId);
         sessionToChannel.set(sessionId, channelId);
 
-        console.log(`[mock-discord] Topic set on #${channel.name}: ${cwd}`);
+        console.log(`[mock-discord] Topic changed on #${channel.name}: ${cwd}`);
         console.log(`[mock-discord] Spawning session ${sessionId} in ${cwd}`);
 
         try {
           await sessionManager.spawnSession(sessionId, cwd);
-          return json(res, 200, { sessionId, channelId, cwd });
+          return json(res, 200, { sessionId, channelId, cwd, previousSessionId: oldSessionId || null });
         } catch (err: any) {
           // Clean up on failure
           channel.sessionId = undefined;
@@ -259,13 +287,53 @@ export function createMockDiscordApp(port: number) {
         return json(res, sent ? 200 : 500, { ok: sent, command });
       }
 
+      if (req.method === 'POST' && url === '/delete-channel') {
+        const { channelId } = body;
+        if (!channelId) {
+          return json(res, 400, { error: 'Missing "channelId"' });
+        }
+
+        const channel = channels.get(channelId);
+        if (!channel) {
+          return json(res, 404, { error: 'Channel not found' });
+        }
+
+        // Kill session if one exists (unregister mappings first, then kill)
+        const sessionId = channel.sessionId;
+        if (sessionId) {
+          console.log(`[mock-discord] Deleting channel #${channel.name}, killing session ${sessionId}`);
+          sessionToChannel.delete(sessionId);
+          channelToSession.delete(channelId);
+          sessionManager.killSession(sessionId);
+          // Brief pause for cleanup
+          await new Promise(r => setTimeout(r, 500));
+        }
+
+        channels.delete(channelId);
+        console.log(`[mock-discord] Channel deleted: #${channel.name} (${channelId})`);
+        return json(res, 200, { ok: true, channelId, killedSessionId: sessionId || null });
+      }
+
+      if (req.method === 'GET' && url === '/sessions') {
+        const sessions = sessionManager.getAllSessions();
+        const channelList = Array.from(channels.values()).map(ch => ({
+          channelId: ch.id,
+          name: ch.name,
+          topic: ch.topic,
+          sessionId: ch.sessionId,
+        }));
+        return json(res, 200, { sessions, channels: channelList });
+      }
+
       // Default: show available endpoints
       return json(res, 200, {
         endpoints: {
           'POST /create-channel': { body: '{ "name": "claude-test" }' },
           'POST /change-topic': { body: '{ "channelId": "...", "topic": "/path/to/dir" }' },
+          'POST /delete-channel': { body: '{ "channelId": "..." }' },
           'POST /send-message': { body: '{ "channelId": "...", "content": "hello" }' },
           'POST /command': { body: '{ "channelId": "...", "command": "clear|interrupt|background|mode|compact|model opus" }' },
+          'GET /sessions': 'List all sessions and channels',
         },
       });
     } catch (err: any) {

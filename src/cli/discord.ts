@@ -131,8 +131,10 @@ export async function discordRun(): Promise<void> {
     console.log('[AFK Code] Endpoints:');
     console.log('  POST /create-channel  { "name": "claude-test" }');
     console.log('  POST /change-topic    { "channelId": "...", "topic": "/path/to/dir" }');
+    console.log('  POST /delete-channel  { "channelId": "..." }');
     console.log('  POST /send-message    { "channelId": "...", "content": "hello" }');
     console.log('  POST /command         { "channelId": "...", "command": "clear|interrupt|background|mode|compact|model opus" }');
+    console.log('  GET  /sessions');
     return;
   }
 

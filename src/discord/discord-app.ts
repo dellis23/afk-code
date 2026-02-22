@@ -2,6 +2,7 @@ import { Client, GatewayIntentBits, Events, ChannelType, AttachmentBuilder, REST
 import type { TextChannel } from 'discord.js';
 import { randomUUID } from 'crypto';
 import { stat as fsStat } from 'fs/promises';
+import { homedir } from 'os';
 import type { DiscordConfig } from './types.js';
 import { SessionManager, type SessionInfo, type ToolCallInfo, type ToolResultInfo } from '../slack/session-manager.js';
 import { ChannelManager } from './channel-manager.js';
@@ -27,30 +28,29 @@ export function createDiscordApp(config: DiscordConfig) {
   // Track tool call messages for threading results
   const toolCallMessages = new Map<string, string>(); // toolUseId -> message id
 
-  // Track channels waiting for a topic (auto-spawn)
-  const pendingAutoSpawn = new Set<string>(); // channelId
-  const spawningChannels = new Set<string>(); // channelId — guard against double-fire
+  // Guard against concurrent spawn attempts on the same channel
+  const spawningChannels = new Set<string>(); // channelId
 
-  async function handleAutoSpawn(channelId: string, channelName: string, cwd: string): Promise<void> {
+  async function handleAutoSpawn(channelId: string, channelName: string, cwd: string, silent?: boolean): Promise<void> {
     // Validate path exists and is a directory
     try {
       const stats = await fsStat(cwd);
       if (!stats.isDirectory()) {
-        const discordChannel = await client.channels.fetch(channelId);
-        if (discordChannel?.type === ChannelType.GuildText) {
-          await discordChannel.send(`\u26a0\ufe0f Path is not a directory: \`${cwd}\`. Update the topic to a valid directory path.`);
+        if (!silent) {
+          const discordChannel = await client.channels.fetch(channelId);
+          if (discordChannel?.type === ChannelType.GuildText) {
+            await discordChannel.send(`\u26a0\ufe0f Path is not a directory: \`${cwd}\`. Update the topic to a valid directory path.`);
+          }
         }
-        // Keep in pendingAutoSpawn so user can correct the topic
-        pendingAutoSpawn.add(channelId);
         return;
       }
     } catch {
-      const discordChannel = await client.channels.fetch(channelId);
-      if (discordChannel?.type === ChannelType.GuildText) {
-        await discordChannel.send(`\u26a0\ufe0f Path does not exist: \`${cwd}\`. Update the topic to a valid directory path.`);
+      if (!silent) {
+        const discordChannel = await client.channels.fetch(channelId);
+        if (discordChannel?.type === ChannelType.GuildText) {
+          await discordChannel.send(`\u26a0\ufe0f Path does not exist: \`${cwd}\`. Update the topic to a valid directory path.`);
+        }
       }
-      // Keep in pendingAutoSpawn so user can correct the topic
-      pendingAutoSpawn.add(channelId);
       return;
     }
 
@@ -94,12 +94,22 @@ export function createDiscordApp(config: DiscordConfig) {
       if (channel) {
         channelManager.updateStatus(sessionId, 'ended');
 
-        const discordChannel = await client.channels.fetch(channel.channelId);
-        if (discordChannel?.type === ChannelType.GuildText) {
-          await discordChannel.send('🛑 **Session ended** - this channel will be archived');
-        }
+        try {
+          const discordChannel = await client.channels.fetch(channel.channelId);
+          if (discordChannel?.type === ChannelType.GuildText) {
+            await discordChannel.send('🛑 **Session ended** - this channel will be archived');
+          }
 
-        await channelManager.archiveChannel(sessionId);
+          await channelManager.archiveChannel(sessionId);
+        } catch (err: any) {
+          // Channel may already be deleted (e.g. user deleted the channel,
+          // which triggered the session kill that led us here).
+          if (err?.code === 10003) {
+            console.log(`[Discord] Channel already deleted for session ${sessionId}, skipping archive`);
+          } else {
+            console.error('[Discord] Error in onSessionEnd:', err);
+          }
+        }
       }
     },
 
@@ -107,15 +117,8 @@ export function createDiscordApp(config: DiscordConfig) {
       const channel = channelManager.getChannel(sessionId);
       if (channel) {
         channelManager.updateName(sessionId, name);
-        // Update channel topic
-        try {
-          const discordChannel = await client.channels.fetch(channel.channelId);
-          if (discordChannel?.type === ChannelType.GuildText) {
-            await discordChannel.setTopic(`Claude Code session: ${name}`);
-          }
-        } catch (err) {
-          console.error('[Discord] Failed to update channel topic:', err);
-        }
+        // Note: we no longer set the channel topic here because the topic
+        // is reserved for the working directory path (used for auto-spawn).
       }
     },
 
@@ -500,51 +503,69 @@ export function createDiscordApp(config: DiscordConfig) {
     }
   });
 
-  // Auto-spawn: detect claude-* channel creation
-  client.on(Events.ChannelCreate, (channel) => {
+  // Auto-spawn: immediately spawn a session when a claude-* channel is created
+  client.on(Events.ChannelCreate, async (channel) => {
     if (channel.type !== ChannelType.GuildText) return;
     if (!channel.name.startsWith('claude-')) return;
 
-    console.log(`[Discord] Detected claude-* channel creation: #${channel.name}`);
-    pendingAutoSpawn.add(channel.id);
+    // Guard against concurrent spawns
+    if (spawningChannels.has(channel.id)) return;
+    spawningChannels.add(channel.id);
+
+    const home = homedir();
+    console.log(`[Discord] Detected claude-* channel creation: #${channel.name}, spawning in ${home}`);
+    await handleAutoSpawn(channel.id, channel.name, home);
+    spawningChannels.delete(channel.id);
   });
 
-  // Auto-spawn: detect topic edit on pending claude-* channels
+  // Auto-spawn: when topic changes to a valid directory, kill existing session and respawn
   client.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
     if (newChannel.type !== ChannelType.GuildText) return;
-    if (!pendingAutoSpawn.has(newChannel.id)) return;
+    if (!newChannel.name.startsWith('claude-')) return;
 
     const oldTopic = oldChannel.type === ChannelType.GuildText ? (oldChannel as TextChannel).topic : null;
     const newTopic = (newChannel as TextChannel).topic;
 
-    // Only trigger when topic was just set (changed from empty/different)
+    // Only react to actual topic changes
     if (!newTopic || newTopic === oldTopic) return;
 
     const cwd = newTopic.trim();
     if (!cwd) return;
 
-    // One-shot guard: prevent double-fire from rapid ChannelUpdate events
+    // Only handle absolute paths — ignore non-path topics (e.g. session descriptions)
+    if (!cwd.startsWith('/')) return;
+
+    // Guard against concurrent spawns
     if (spawningChannels.has(newChannel.id)) return;
     spawningChannels.add(newChannel.id);
-    pendingAutoSpawn.delete(newChannel.id);
 
-    console.log(`[Discord] Auto-spawning session for #${newChannel.name} in ${cwd}`);
+    // Kill existing session for this channel if any
+    const existingSessionId = channelManager.getSessionByChannel(newChannel.id);
+    if (existingSessionId) {
+      console.log(`[Discord] Topic changed on #${newChannel.name}, killing session ${existingSessionId}`);
+      channelManager.unregisterChannel(existingSessionId);
+      sessionManager.killSession(existingSessionId);
+      // Brief pause for cleanup
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    console.log(`[Discord] Spawning new session for #${newChannel.name} in ${cwd}`);
     await handleAutoSpawn(newChannel.id, newChannel.name, cwd);
     spawningChannels.delete(newChannel.id);
   });
 
   // Auto-spawn: cleanup on channel delete
   client.on(Events.ChannelDelete, (channel) => {
-    // Clean up pending state
-    pendingAutoSpawn.delete(channel.id);
-
-    // If channel has an active session, kill it
+    // If channel has an active session, unregister first then kill.
+    // Unregistering before killing ensures onSessionEnd won't try to
+    // fetch/message the already-deleted channel.
     const sessionId = channelManager.getSessionByChannel(channel.id);
     if (sessionId) {
       console.log(`[Discord] Channel deleted, killing session ${sessionId}`);
+      channelManager.unregisterChannel(sessionId);
       sessionManager.killSession(sessionId);
     }
   });
 
-  return { client, sessionManager, channelManager, pendingAutoSpawn };
+  return { client, sessionManager, channelManager };
 }
