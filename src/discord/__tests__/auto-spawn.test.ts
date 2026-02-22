@@ -228,6 +228,109 @@ describe('Auto-Spawn - Channel Lifecycle', () => {
     expect(foundSessionId).toBeUndefined();
   });
 
+  it('restores sessions for existing claude-* channels on restart', () => {
+    // On bot restart, scan guild for claude-* text channels and restore sessions.
+    // Use topic as cwd if it's a valid absolute path, otherwise fall back to $HOME.
+    const existingChannels = [
+      { id: 'chan-1', name: 'claude-project', type: 'GuildText', topic: '/home/user/project' },
+      { id: 'chan-2', name: 'claude-test', type: 'GuildText', topic: '' },
+      { id: 'chan-3', name: 'claude-other', type: 'GuildText', topic: 'Some description' },
+      { id: 'chan-4', name: 'general', type: 'GuildText', topic: '' },
+      { id: 'chan-5', name: 'claude-voice', type: 'GuildVoice', topic: '' },
+    ];
+
+    const home = '/home/user';
+    const restoredSessions: { channelId: string; cwd: string }[] = [];
+
+    for (const ch of existingChannels) {
+      // Only text channels
+      if (ch.type !== 'GuildText') continue;
+      // Only claude-* prefix
+      if (!ch.name.startsWith('claude-')) continue;
+
+      // Determine cwd: topic if absolute path, else $HOME
+      const topic = ch.topic?.trim();
+      const cwd = (topic && topic.startsWith('/')) ? topic : home;
+
+      restoredSessions.push({ channelId: ch.id, cwd });
+    }
+
+    // Should restore chan-1 (topic=/home/user/project), chan-2 ($HOME), chan-3 ($HOME)
+    // Should skip chan-4 (no claude- prefix) and chan-5 (not text channel)
+    expect(restoredSessions).toHaveLength(3);
+    expect(restoredSessions[0]).toEqual({ channelId: 'chan-1', cwd: '/home/user/project' });
+    expect(restoredSessions[1]).toEqual({ channelId: 'chan-2', cwd: home });
+    expect(restoredSessions[2]).toEqual({ channelId: 'chan-3', cwd: home });
+  });
+
+  it('uses --resume with saved Claude session UUID on restore', () => {
+    // Persisted state maps channel ID → Claude session UUID (from JSONL filename).
+    // On restore, we use --resume <uuid> to continue the exact conversation.
+    const savedState = new Map<string, { claudeSessionId: string; cwd: string }>();
+    savedState.set('chan-1', { claudeSessionId: '16eb1b09-36ac-4761-9a97-5e02265e661b', cwd: '/home/user/project' });
+    savedState.set('chan-2', { claudeSessionId: 'abcdef01-2345-6789-abcd-ef0123456789', cwd: '/home/user' });
+
+    const channels = [
+      { id: 'chan-1', name: 'claude-project', type: 'GuildText', topic: '/home/user/project' },
+      { id: 'chan-2', name: 'claude-test', type: 'GuildText', topic: '' },
+      { id: 'chan-3', name: 'claude-new', type: 'GuildText', topic: '' }, // no saved state
+    ];
+
+    const home = '/home/user';
+    const spawnCommands: { channelId: string; cwd: string; resumeSessionId?: string }[] = [];
+
+    for (const ch of channels) {
+      if (ch.type !== 'GuildText') continue;
+      if (!ch.name.startsWith('claude-')) continue;
+
+      const saved = savedState.get(ch.id);
+      const topic = ch.topic?.trim();
+      const cwd = (topic && topic.startsWith('/')) ? topic : (saved?.cwd || home);
+
+      spawnCommands.push({
+        channelId: ch.id,
+        cwd,
+        resumeSessionId: saved?.claudeSessionId,
+      });
+    }
+
+    // chan-1: has saved state, should --resume with exact UUID
+    expect(spawnCommands[0].resumeSessionId).toBe('16eb1b09-36ac-4761-9a97-5e02265e661b');
+    expect(spawnCommands[0].cwd).toBe('/home/user/project');
+
+    // chan-2: has saved state, should --resume with exact UUID, cwd from saved state
+    expect(spawnCommands[1].resumeSessionId).toBe('abcdef01-2345-6789-abcd-ef0123456789');
+    expect(spawnCommands[1].cwd).toBe('/home/user');
+
+    // chan-3: no saved state, should start fresh (no resumeSessionId)
+    expect(spawnCommands[2].resumeSessionId).toBeUndefined();
+    expect(spawnCommands[2].cwd).toBe(home);
+  });
+
+  it('extracts Claude session UUID from JSONL filename', () => {
+    const watchedFile = '/home/user/.claude/projects/-home-user/16eb1b09-36ac-4761-9a97-5e02265e661b.jsonl';
+    const filename = watchedFile.split('/').pop();
+    const claudeSessionId = filename?.replace('.jsonl', '');
+    expect(claudeSessionId).toBe('16eb1b09-36ac-4761-9a97-5e02265e661b');
+  });
+
+  it('updates persisted state when Claude session UUID changes (after /clear)', () => {
+    const persistedChannels = new Map<string, { claudeSessionId: string }>();
+    const channelId = 'chan-1';
+
+    // Initially persisted
+    persistedChannels.set(channelId, { claudeSessionId: 'old-uuid' });
+
+    // After /clear, new JSONL → new UUID
+    const newClaudeId = 'new-uuid';
+    const existing = persistedChannels.get(channelId);
+    expect(existing?.claudeSessionId).not.toBe(newClaudeId);
+
+    // Should update
+    persistedChannels.set(channelId, { claudeSessionId: newClaudeId });
+    expect(persistedChannels.get(channelId)?.claudeSessionId).toBe(newClaudeId);
+  });
+
   it('unregisters channel before killing session on delete to prevent stale fetch', () => {
     // This tests the fix for DiscordAPIError[10003]: Unknown Channel.
     // When a channel is deleted, we must unregister the channel mapping

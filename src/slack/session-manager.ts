@@ -155,13 +155,16 @@ export class SessionManager {
     }
   }
 
-  async spawnSession(sessionId: string, cwd: string): Promise<void> {
+  async spawnSession(sessionId: string, cwd: string, options?: { resumeSessionId?: string }): Promise<void> {
     const pty = await import('node-pty');
     // Normalize: strip trailing slashes so the project dir matches what Claude uses
     cwd = cwd.replace(/\/+$/, '') || '/';
     const projectDir = getClaudeProjectDir(cwd);
 
     const command = ['claude', '--dangerously-skip-permissions'];
+    if (options?.resumeSessionId) {
+      command.push('--resume', options.resumeSessionId);
+    }
 
     // Strip Claude-related env vars so the child process doesn't think
     // it's nested inside another Claude session
@@ -326,6 +329,19 @@ export class SessionManager {
       status: session.status,
       startedAt: session.startedAt,
     };
+  }
+
+  /**
+   * Get the Claude session UUID (from the JSONL filename) for a session.
+   * Returns undefined if no JSONL file has been claimed yet.
+   */
+  getClaudeSessionId(sessionId: string): string | undefined {
+    const session = this.sessions.get(sessionId);
+    if (!session?.watchedFile) return undefined;
+    // Extract UUID from path like /home/user/.claude/projects/-home-user/16eb1b09-...jsonl
+    const filename = session.watchedFile.split('/').pop();
+    if (!filename) return undefined;
+    return filename.replace('.jsonl', '');
   }
 
   getAllSessions(): SessionInfo[] {

@@ -8,6 +8,7 @@ import { SessionManager, type SessionInfo, type ToolCallInfo, type ToolResultInf
 import { ChannelManager } from './channel-manager.js';
 import { markdownToSlack, chunkMessage, formatSessionStatus, formatTodos } from '../slack/message-formatter.js';
 import { extractImagePaths } from '../utils/image-extractor.js';
+import { loadChannelState, saveChannelState, type ChannelState } from './channel-state.js';
 
 export const ALLOWED_MODELS = ['opus', 'sonnet', 'haiku'];
 
@@ -31,12 +32,33 @@ export function createDiscordApp(config: DiscordConfig) {
   // Guard against concurrent spawn attempts on the same channel
   const spawningChannels = new Set<string>(); // channelId
 
-  async function handleAutoSpawn(channelId: string, channelName: string, cwd: string, silent?: boolean): Promise<void> {
+  // Persistent state for restoring sessions across bot restarts
+  const persistedChannels = new Map<string, ChannelState>();
+
+  async function persistChannelState(channelId: string, channelName: string, cwd: string, claudeSessionId: string): Promise<void> {
+    persistedChannels.set(channelId, { channelId, channelName, cwd, claudeSessionId });
+    try {
+      await saveChannelState(persistedChannels);
+    } catch (err) {
+      console.error('[Discord] Failed to save channel state:', err);
+    }
+  }
+
+  async function removePersistedChannel(channelId: string): Promise<void> {
+    persistedChannels.delete(channelId);
+    try {
+      await saveChannelState(persistedChannels);
+    } catch (err) {
+      console.error('[Discord] Failed to save channel state:', err);
+    }
+  }
+
+  async function handleAutoSpawn(channelId: string, channelName: string, cwd: string, options?: { silent?: boolean; resumeSessionId?: string }): Promise<void> {
     // Validate path exists and is a directory
     try {
       const stats = await fsStat(cwd);
       if (!stats.isDirectory()) {
-        if (!silent) {
+        if (!options?.silent) {
           const discordChannel = await client.channels.fetch(channelId);
           if (discordChannel?.type === ChannelType.GuildText) {
             await discordChannel.send(`\u26a0\ufe0f Path is not a directory: \`${cwd}\`. Update the topic to a valid directory path.`);
@@ -45,7 +67,7 @@ export function createDiscordApp(config: DiscordConfig) {
         return;
       }
     } catch {
-      if (!silent) {
+      if (!options?.silent) {
         const discordChannel = await client.channels.fetch(channelId);
         if (discordChannel?.type === ChannelType.GuildText) {
           await discordChannel.send(`\u26a0\ufe0f Path does not exist: \`${cwd}\`. Update the topic to a valid directory path.`);
@@ -60,7 +82,7 @@ export function createDiscordApp(config: DiscordConfig) {
     channelManager.registerExternalChannel(sessionId, channelId, channelName, cwd);
 
     try {
-      await sessionManager.spawnSession(sessionId, cwd);
+      await sessionManager.spawnSession(sessionId, cwd, { resumeSessionId: options?.resumeSessionId });
     } catch (err: any) {
       console.error(`[Discord] Failed to spawn session for #${channelName}:`, err);
       const discordChannel = await client.channels.fetch(channelId);
@@ -132,6 +154,18 @@ export function createDiscordApp(config: DiscordConfig) {
     onMessage: async (sessionId, role, content) => {
       const channel = channelManager.getChannel(sessionId);
       if (channel) {
+        // Persist the Claude session UUID once it's known (or update if changed after /clear)
+        const claudeId = sessionManager.getClaudeSessionId(sessionId);
+        if (claudeId) {
+          const existing = persistedChannels.get(channel.channelId);
+          if (!existing || existing.claudeSessionId !== claudeId) {
+            const sessionInfo = sessionManager.getSession(sessionId);
+            const cwd = sessionInfo?.cwd || homedir();
+            await persistChannelState(channel.channelId, channel.channelName, cwd, claudeId);
+            console.log(`[Discord] Persisted channel state: #${channel.channelName} → Claude session ${claudeId}`);
+          }
+        }
+
         // Discord markdown is similar to Slack's mrkdwn but uses standard markdown
         const formatted = content; // Discord uses standard markdown
 
@@ -368,6 +402,58 @@ export function createDiscordApp(config: DiscordConfig) {
     } catch (err) {
       console.error('[Discord] Failed to register slash commands:', err);
     }
+
+    // Restore sessions for existing claude-* channels
+    const guild = channelManager.getGuild();
+    if (guild) {
+      try {
+        // Load persisted channel state from previous run
+        const savedState = await loadChannelState();
+        // Populate in-memory map
+        for (const [id, state] of savedState) {
+          persistedChannels.set(id, state);
+        }
+
+        const allChannels = await guild.channels.fetch();
+        for (const [, channel] of allChannels) {
+          if (!channel || channel.type !== ChannelType.GuildText) continue;
+          if (!channel.name.startsWith('claude-')) continue;
+
+          // Look up saved state for this channel
+          const saved = persistedChannels.get(channel.id);
+
+          // Determine cwd from topic or saved state or $HOME
+          const topic = (channel as TextChannel).topic?.trim();
+          const cwd = (topic && topic.startsWith('/')) ? topic : (saved?.cwd || homedir());
+
+          // Use saved Claude session UUID for --resume if available
+          const resumeSessionId = saved?.claudeSessionId;
+
+          if (resumeSessionId) {
+            console.log(`[Discord] Restoring session for #${channel.name} in ${cwd} (resuming Claude session ${resumeSessionId})`);
+          } else {
+            console.log(`[Discord] Restoring session for #${channel.name} in ${cwd} (fresh — no saved session)`);
+          }
+
+          await handleAutoSpawn(channel.id, channel.name, cwd, { silent: true, resumeSessionId });
+
+          // Only post restore message if spawn succeeded (channel is now mapped)
+          const sessionId = channelManager.getSessionByChannel(channel.id);
+          if (sessionId) {
+            const msg = resumeSessionId
+              ? `🔄 **Session restored** — bot restarted, conversation resumed in \`${cwd}\``
+              : `🔄 **Session restored** — bot restarted, new session spawned in \`${cwd}\``;
+            try {
+              await (channel as TextChannel).send(msg);
+            } catch (err) {
+              console.error(`[Discord] Failed to post restore message in #${channel.name}:`, err);
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[Discord] Failed to restore sessions:', err);
+      }
+    }
   });
 
   // Handle slash commands
@@ -545,6 +631,8 @@ export function createDiscordApp(config: DiscordConfig) {
       console.log(`[Discord] Topic changed on #${newChannel.name}, killing session ${existingSessionId}`);
       channelManager.unregisterChannel(existingSessionId);
       sessionManager.killSession(existingSessionId);
+      // Clear persisted state — new directory means fresh session
+      await removePersistedChannel(newChannel.id);
       // Brief pause for cleanup
       await new Promise(r => setTimeout(r, 500));
     }
@@ -555,7 +643,7 @@ export function createDiscordApp(config: DiscordConfig) {
   });
 
   // Auto-spawn: cleanup on channel delete
-  client.on(Events.ChannelDelete, (channel) => {
+  client.on(Events.ChannelDelete, async (channel) => {
     // If channel has an active session, unregister first then kill.
     // Unregistering before killing ensures onSessionEnd won't try to
     // fetch/message the already-deleted channel.
@@ -565,6 +653,8 @@ export function createDiscordApp(config: DiscordConfig) {
       channelManager.unregisterChannel(sessionId);
       sessionManager.killSession(sessionId);
     }
+    // Remove persisted state so we don't try to restore this channel
+    await removePersistedChannel(channel.id);
   });
 
   return { client, sessionManager, channelManager };

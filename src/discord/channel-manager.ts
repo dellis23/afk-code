@@ -195,6 +195,13 @@ export class ChannelManager {
   }
 
   /**
+   * Get the guild this manager is operating in.
+   */
+  getGuild(): Guild | null {
+    return this.guild;
+  }
+
+  /**
    * Register an externally-created channel (e.g. user-created claude-* channels)
    * for bidirectional mapping without creating a new Discord channel.
    */
