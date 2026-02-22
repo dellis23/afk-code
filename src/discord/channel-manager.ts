@@ -193,4 +193,41 @@ export class ChannelManager {
   getAllActive(): ChannelMapping[] {
     return Array.from(this.channels.values()).filter((c) => c.status !== 'ended');
   }
+
+  /**
+   * Register an externally-created channel (e.g. user-created claude-* channels)
+   * for bidirectional mapping without creating a new Discord channel.
+   */
+  registerExternalChannel(
+    sessionId: string,
+    channelId: string,
+    channelName: string,
+    cwd: string
+  ): void {
+    const mapping: ChannelMapping = {
+      sessionId,
+      channelId,
+      channelName,
+      sessionName: `claude-${sessionId}`,
+      status: 'running',
+      createdAt: new Date(),
+    };
+
+    this.channels.set(sessionId, mapping);
+    this.channelToSession.set(channelId, sessionId);
+
+    console.log(`[ChannelManager] Registered external channel #${channelName} for session ${sessionId}`);
+  }
+
+  /**
+   * Remove a channel mapping (used on spawn failure cleanup).
+   */
+  unregisterChannel(sessionId: string): void {
+    const mapping = this.channels.get(sessionId);
+    if (mapping) {
+      this.channelToSession.delete(mapping.channelId);
+      this.channels.delete(sessionId);
+      console.log(`[ChannelManager] Unregistered channel for session ${sessionId}`);
+    }
+  }
 }

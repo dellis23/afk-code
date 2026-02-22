@@ -5,17 +5,11 @@ import { readFile } from 'fs/promises';
 import { createConnection, type Socket } from 'net';
 import * as pty from 'node-pty';
 import { sanitizePtyInput, isRawControlSequence } from '../utils/sanitize.js';
+import { getClaudeProjectDir } from '../utils/claude-paths.js';
 
 const AFK_CODE_DIR = join(homedir(), '.afk-code');
 const DAEMON_SOCKET = join(AFK_CODE_DIR, 'daemon.sock');
 const DAEMON_SECRET_PATH = join(AFK_CODE_DIR, 'daemon.secret');
-
-// Get Claude's project directory for the current working directory
-function getClaudeProjectDir(cwd: string): string {
-  // Claude encodes paths by replacing / with -
-  const encodedPath = cwd.replace(/\//g, '-');
-  return `${homedir()}/.claude/projects/${encodedPath}`;
-}
 
 // Read the shared secret for daemon authentication
 async function readDaemonSecret(): Promise<string | null> {

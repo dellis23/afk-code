@@ -6,11 +6,13 @@
 import { watch, type FSWatcher } from 'fs';
 import { readdir, readFile, stat, unlink, mkdir, writeFile } from 'fs/promises';
 import { createServer, type Server, type Socket } from 'net';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { homedir } from 'os';
 import { join } from 'path';
+import type { IPty } from 'node-pty';
 import type { TodoItem } from '../types.js';
 import { sanitizePtyInput } from '../utils/sanitize.js';
+import { getClaudeProjectDir } from '../utils/claude-paths.js';
 
 const AFK_CODE_DIR = join(homedir(), '.afk-code');
 export const DAEMON_SOCKET = join(AFK_CODE_DIR, 'daemon.sock');
@@ -26,7 +28,8 @@ export interface SessionInfo {
 }
 
 interface InternalSession extends SessionInfo {
-  socket: Socket;
+  socket?: Socket;    // present for remote CLI sessions
+  pty?: IPty;         // present for locally-spawned sessions
   watcher?: FSWatcher;
   watchedFile?: string;
   seenMessages: Set<string>;
@@ -140,10 +143,85 @@ export class SessionManager {
   stop(): void {
     for (const session of this.sessions.values()) {
       this.stopWatching(session);
+      if (session.pty) {
+        try {
+          session.pty.kill();
+        } catch {}
+      }
     }
     this.sessions.clear();
     if (this.server) {
       this.server.close();
+    }
+  }
+
+  async spawnSession(sessionId: string, cwd: string): Promise<void> {
+    const pty = await import('node-pty');
+    const projectDir = getClaudeProjectDir(cwd);
+
+    const command = ['claude', '--dangerously-skip-permissions'];
+    const ptyProcess = pty.spawn(command[0], command.slice(1), {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 40,
+      cwd,
+      env: process.env as Record<string, string>,
+    });
+
+    // Snapshot existing JSONL files before creating session
+    const initialFileStats = await this.snapshotJsonlFiles(projectDir);
+
+    const session: InternalSession = {
+      id: sessionId,
+      name: `claude-${sessionId}`,
+      cwd,
+      projectDir,
+      pty: ptyProcess,
+      status: 'running',
+      seenMessages: new Set(),
+      startedAt: new Date(),
+      slugFound: false,
+      lastTodosHash: '',
+      inPlanMode: false,
+      initialFileStats,
+    };
+
+    this.sessions.set(sessionId, session);
+    console.log(`[SessionManager] Spawned local session: ${sessionId} in ${cwd}`);
+
+    ptyProcess.onExit(() => {
+      console.log(`[SessionManager] Local session exited: ${sessionId}`);
+      this.stopWatching(session);
+      this.sessions.delete(sessionId);
+      this.events.onSessionEnd(sessionId);
+    });
+
+    this.events.onSessionStart({
+      id: session.id,
+      name: session.name,
+      cwd: session.cwd,
+      projectDir: session.projectDir,
+      status: session.status,
+      startedAt: session.startedAt,
+    });
+
+    this.startWatching(session);
+  }
+
+  killSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    if (session.pty) {
+      try {
+        session.pty.kill();
+      } catch {}
+    }
+
+    if (session.socket) {
+      try {
+        session.socket.end();
+      } catch {}
     }
   }
 
@@ -157,27 +235,52 @@ export class SessionManager {
     // Sanitize input unless raw mode is requested (for control sequences)
     const sanitizedText = raw ? text : sanitizePtyInput(text);
 
-    // Send text first, then Enter
-    try {
-      session.socket.write(JSON.stringify({ type: 'input', text: sanitizedText }) + '\n');
-    } catch (err) {
-      console.error(`[SessionManager] Failed to send input to ${sessionId}:`, err);
-      // Socket is dead, clean up
-      this.stopWatching(session);
-      this.sessions.delete(sessionId);
-      this.events.onSessionEnd(sessionId);
-      return false;
+    if (session.pty) {
+      // Local PTY session — write directly
+      try {
+        session.pty.write(sanitizedText);
+      } catch (err) {
+        console.error(`[SessionManager] Failed to write to PTY for ${sessionId}:`, err);
+        return false;
+      }
+
+      setTimeout(() => {
+        try {
+          session.pty?.write('\r');
+        } catch {
+          // PTY likely already dead
+        }
+      }, 50);
+
+      return true;
     }
 
-    setTimeout(() => {
+    if (session.socket) {
+      // Remote CLI session — send JSON over socket
       try {
-        session.socket.write(JSON.stringify({ type: 'input', text: '\r' }) + '\n');
-      } catch {
-        // Session likely already cleaned up from the first write failure
+        session.socket.write(JSON.stringify({ type: 'input', text: sanitizedText }) + '\n');
+      } catch (err) {
+        console.error(`[SessionManager] Failed to send input to ${sessionId}:`, err);
+        // Socket is dead, clean up
+        this.stopWatching(session);
+        this.sessions.delete(sessionId);
+        this.events.onSessionEnd(sessionId);
+        return false;
       }
-    }, 50);
 
-    return true;
+      setTimeout(() => {
+        try {
+          session.socket?.write(JSON.stringify({ type: 'input', text: '\r' }) + '\n');
+        } catch {
+          // Session likely already cleaned up from the first write failure
+        }
+      }, 50);
+
+      return true;
+    }
+
+    console.error(`[SessionManager] Session ${sessionId} has no pty or socket`);
+    return false;
   }
 
   getSession(sessionId: string): SessionInfo | undefined {
