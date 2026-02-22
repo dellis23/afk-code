@@ -345,6 +345,9 @@ export function createDiscordApp(config: DiscordConfig) {
         .setName('compact')
         .setDescription('Compact the conversation (/compact)'),
       new SlashCommandBuilder()
+        .setName('clear')
+        .setDescription('Clear conversation and start fresh (/clear)'),
+      new SlashCommandBuilder()
         .setName('model')
         .setDescription('Switch Claude model')
         .addStringOption(option =>
@@ -442,6 +445,29 @@ export function createDiscordApp(config: DiscordConfig) {
       const sent = sessionManager.sendInput(sessionId, '/compact\n');
       if (sent) {
         await interaction.reply('🗜️ Sent /compact');
+      } else {
+        await interaction.reply('⚠️ Failed to send command - session not connected.');
+      }
+    }
+
+    if (commandName === 'clear') {
+      const sessionId = channelManager.getSessionByChannel(channelId);
+      if (!sessionId) {
+        await interaction.reply('⚠️ This channel is not associated with an active session.');
+        return;
+      }
+
+      const channel = channelManager.getChannel(sessionId);
+      if (!channel || channel.status === 'ended') {
+        await interaction.reply('⚠️ This session has ended.');
+        return;
+      }
+
+      // Reset the watched file so we pick up the new JSONL after /clear
+      sessionManager.resetWatchedFile(sessionId);
+      const sent = sessionManager.sendInput(sessionId, '/clear\n');
+      if (sent) {
+        await interaction.reply('🧹 Conversation cleared');
       } else {
         await interaction.reply('⚠️ Failed to send command - session not connected.');
       }

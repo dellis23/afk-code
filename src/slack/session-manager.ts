@@ -221,6 +221,25 @@ export class SessionManager {
     this.startWatching(session);
   }
 
+  /**
+   * Reset the watched JSONL file for a session, so the watcher picks up
+   * the next new file. Used after /clear which starts a new conversation.
+   */
+  resetWatchedFile(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    if (session.watchedFile) {
+      // Keep the old file in claimedFiles so it's never re-found by
+      // findActiveJsonlFile. Only clear the watchedFile reference so the
+      // watcher/poll picks up the next new unclaimed file.
+      session.watchedFile = undefined;
+      session.seenMessages.clear();
+      session.slugFound = false;
+      console.log(`[SessionManager] Reset watched file for session ${sessionId}`);
+    }
+  }
+
   killSession(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
@@ -547,6 +566,7 @@ export class SessionManager {
       await mkdir(session.projectDir, { recursive: true });
       session.watcher = watch(session.projectDir, { recursive: false }, async (_, filename) => {
         if (!filename?.endsWith('.jsonl')) return;
+        if (filename.startsWith('agent-')) return;
 
         if (!session.watchedFile) {
           const newFile = await this.findActiveJsonlFile(session);
