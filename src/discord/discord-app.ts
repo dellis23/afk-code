@@ -29,6 +29,7 @@ export function createDiscordApp(config: DiscordConfig) {
 
   // Track channels waiting for a topic (auto-spawn)
   const pendingAutoSpawn = new Set<string>(); // channelId
+  const spawningChannels = new Set<string>(); // channelId — guard against double-fire
 
   async function handleAutoSpawn(channelId: string, channelName: string, cwd: string): Promise<void> {
     // Validate path exists and is a directory
@@ -75,11 +76,15 @@ export function createDiscordApp(config: DiscordConfig) {
     onSessionStart: async (session) => {
       const channel = await channelManager.createChannel(session.id, session.name, session.cwd);
       if (channel) {
-        const discordChannel = await client.channels.fetch(channel.channelId);
-        if (discordChannel?.type === ChannelType.GuildText) {
-          await discordChannel.send(
-            `${formatSessionStatus(session.status)} **Session started**\n\`${session.cwd}\``
-          );
+        try {
+          const discordChannel = await client.channels.fetch(channel.channelId);
+          if (discordChannel?.type === ChannelType.GuildText) {
+            await discordChannel.send(
+              `${formatSessionStatus(session.status)} **Session started**\n\`${session.cwd}\``
+            );
+          }
+        } catch (err) {
+          console.error(`[Discord] Error in onSessionStart:`, err);
         }
       }
     },
@@ -492,11 +497,14 @@ export function createDiscordApp(config: DiscordConfig) {
     const cwd = newTopic.trim();
     if (!cwd) return;
 
-    // One-shot guard: remove from pending before spawning
+    // One-shot guard: prevent double-fire from rapid ChannelUpdate events
+    if (spawningChannels.has(newChannel.id)) return;
+    spawningChannels.add(newChannel.id);
     pendingAutoSpawn.delete(newChannel.id);
 
     console.log(`[Discord] Auto-spawning session for #${newChannel.name} in ${cwd}`);
     await handleAutoSpawn(newChannel.id, newChannel.name, cwd);
+    spawningChannels.delete(newChannel.id);
   });
 
   // Auto-spawn: cleanup on channel delete

@@ -157,15 +157,24 @@ export class SessionManager {
 
   async spawnSession(sessionId: string, cwd: string): Promise<void> {
     const pty = await import('node-pty');
+    // Normalize: strip trailing slashes so the project dir matches what Claude uses
+    cwd = cwd.replace(/\/+$/, '') || '/';
     const projectDir = getClaudeProjectDir(cwd);
 
     const command = ['claude', '--dangerously-skip-permissions'];
+
+    // Strip Claude-related env vars so the child process doesn't think
+    // it's nested inside another Claude session
+    const env = { ...process.env };
+    delete env.CLAUDECODE;
+    delete env.CLAUDE_CODE_ENTRYPOINT;
+
     const ptyProcess = pty.spawn(command[0], command.slice(1), {
       name: 'xterm-256color',
       cols: 120,
       rows: 40,
       cwd,
-      env: process.env as Record<string, string>,
+      env: env as Record<string, string>,
     });
 
     // Snapshot existing JSONL files before creating session
@@ -188,6 +197,10 @@ export class SessionManager {
 
     this.sessions.set(sessionId, session);
     console.log(`[SessionManager] Spawned local session: ${sessionId} in ${cwd}`);
+
+    // Drain PTY output to prevent the buffer from filling up and blocking Claude.
+    // The actual conversation data comes from JSONL file watching, not PTY output.
+    ptyProcess.onData(() => {});
 
     ptyProcess.onExit(() => {
       console.log(`[SessionManager] Local session exited: ${sessionId}`);
