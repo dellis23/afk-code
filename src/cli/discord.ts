@@ -120,6 +120,22 @@ async function loadEnvFile(path: string): Promise<Record<string, string>> {
 }
 
 export async function discordRun(): Promise<void> {
+  // Mock mode — HTTP server instead of real Discord
+  if (process.argv.includes('--mock-discord')) {
+    const { createMockDiscordApp } = await import('../discord/mock-discord-app.js');
+    const port = parseInt(process.env.PORT || '3000', 10);
+    const app = createMockDiscordApp(port);
+
+    await app.start();
+    console.log(`[AFK Code] Mock Discord mode — HTTP server on http://localhost:${port}`);
+    console.log('[AFK Code] Endpoints:');
+    console.log('  POST /create-channel  { "name": "claude-test" }');
+    console.log('  POST /change-topic    { "channelId": "...", "topic": "/path/to/dir" }');
+    console.log('  POST /send-message    { "channelId": "...", "content": "hello" }');
+    console.log('  POST /command         { "channelId": "...", "command": "clear|interrupt|background|mode|compact|model opus" }');
+    return;
+  }
+
   // Load config from multiple sources (in order of precedence):
   // 1. Environment variables (highest priority)
   // 2. Local .env file
