@@ -76,6 +76,18 @@ npx afk-code claude
 
 A new channel is created for each session. Messages relay bidirectionally.
 
+## Auto-Spawn Sessions from Discord
+
+Instead of starting Claude from a terminal, you can create a channel directly in Discord:
+
+1. Create a text channel named `claude-something` (any name starting with `claude-`)
+2. Edit the channel topic to a directory path (e.g. `/home/dan/myproject`)
+3. The bot validates the path, spawns `claude --dangerously-skip-permissions` in that directory, and begins relaying messages
+4. Type in the channel to send input to Claude
+5. Delete the channel to kill the session
+
+This lets you start Claude sessions entirely from Discord (or your phone) without needing terminal access.
+
 ## Image Support
 
 When Claude references image paths in responses (e.g., `/path/to/screenshot.png`), the bot automatically detects and uploads them to the chat. Supports PNG, JPG, GIF, WebP, and other common formats.
@@ -83,14 +95,15 @@ When Claude references image paths in responses (e.g., `/path/to/screenshot.png`
 ## Commands
 
 ```
-afk-code telegram setup     Configure Telegram credentials
-afk-code telegram           Run the Telegram bot
-afk-code discord setup      Configure Discord credentials
-afk-code discord            Run the Discord bot
-afk-code slack setup        Configure Slack credentials
-afk-code slack              Run the Slack bot
-afk-code <command> [args]   Start a monitored session
-afk-code help               Show help
+afk-code telegram setup          Configure Telegram credentials
+afk-code telegram                Run the Telegram bot
+afk-code discord setup           Configure Discord credentials
+afk-code discord                 Run the Discord bot
+afk-code discord --mock-discord  Run with mock HTTP server (testing)
+afk-code slack setup             Configure Slack credentials
+afk-code slack                   Run the Slack bot
+afk-code <command> [args]        Start a monitored session
+afk-code help                    Show help
 ```
 
 ### Slash Commands
@@ -101,6 +114,7 @@ afk-code help               Show help
 | `/switch <name>` | - | - | ✓ | Switch session (Telegram only) |
 | `/model <name>` | ✓ | ✓ | ✓ | Switch model (opus, sonnet, haiku) |
 | `/compact` | ✓ | ✓ | ✓ | Compact the conversation |
+| `/clear` | - | ✓ | - | Clear conversation and start fresh |
 | `/background` | ✓ | ✓ | ✓ | Send Ctrl+B (background mode) |
 | `/interrupt` | ✓ | ✓ | ✓ | Send Escape (interrupt) |
 | `/mode` | ✓ | ✓ | ✓ | Toggle mode (Shift+Tab) |
@@ -123,12 +137,45 @@ npm run dev -- claude
 
 Requires Node.js 18+.
 
+## Mock Discord Mode
+
+For testing without a real Discord connection, run in mock mode:
+
+```bash
+npx afk-code discord --mock-discord
+```
+
+This starts an HTTP server on `localhost:3000` that simulates Discord events. All bot responses are logged to the terminal. Use curl to drive the full flow:
+
+```bash
+# Create a channel
+curl -X POST localhost:3000/create-channel \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"claude-test"}'
+
+# Set topic to spawn a Claude session
+curl -X POST localhost:3000/change-topic \
+  -H 'Content-Type: application/json' \
+  -d '{"channelId":"mock-chan-1","topic":"/path/to/project"}'
+
+# Send a message
+curl -X POST localhost:3000/send-message \
+  -H 'Content-Type: application/json' \
+  -d '{"channelId":"mock-chan-1","content":"hello"}'
+
+# Run a slash command (clear, interrupt, background, mode, compact, model opus)
+curl -X POST localhost:3000/command \
+  -H 'Content-Type: application/json' \
+  -d '{"channelId":"mock-chan-1","command":"clear"}'
+```
+
 ## How It Works
 
 1. `afk-code slack`, `afk-code discord`, or `afk-code telegram` starts a bot that listens for sessions
 2. `afk-code claude` spawns Claude in a PTY and connects to the bot via Unix socket
 3. The bot watches Claude's JSONL files for messages and relays them to chat
 4. Messages you send in chat are forwarded to the terminal
+5. With auto-spawn (Discord), creating a `claude-*` channel and setting its topic to a directory spawns Claude directly — no terminal needed
 
 ## Limitations
 
