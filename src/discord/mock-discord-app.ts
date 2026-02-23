@@ -288,6 +288,15 @@ export function createMockDiscordApp(port: number) {
             return json(res, 400, { error: `Invalid model. Choose from: ${ALLOWED_MODELS.join(', ')}` });
           }
           sent = sessionManager.sendInput(sessionId, `/model ${model}\n`);
+        } else if (cmd === 'context') {
+          const usage = await sessionManager.getContextUsage(sessionId);
+          if (!usage) {
+            return json(res, 200, { ok: true, command, message: 'No usage data yet' });
+          }
+          const pct = ((usage.totalTokens / usage.contextLimit) * 100).toFixed(1);
+          const usedK = Math.round(usage.totalTokens / 1000);
+          const limitK = usage.contextLimit / 1000;
+          return json(res, 200, { ok: true, command, usedK, limitK, percent: pct, ...usage });
         } else {
           return json(res, 400, { error: `Unknown command: ${command}` });
         }

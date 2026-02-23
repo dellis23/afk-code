@@ -396,6 +396,9 @@ export function createDiscordApp(config: DiscordConfig) {
           option.setName('name')
             .setDescription('Model name (opus, sonnet, haiku)')
             .setRequired(true)),
+      new SlashCommandBuilder()
+        .setName('context')
+        .setDescription('Show context window usage for this session'),
     ];
 
     try {
@@ -653,6 +656,25 @@ export function createDiscordApp(config: DiscordConfig) {
       } else {
         await interaction.reply('⚠️ Failed to send command - session not connected.');
       }
+    }
+
+    if (commandName === 'context') {
+      const sessionId = channelManager.getSessionByChannel(channelId);
+      if (!sessionId) {
+        await interaction.reply('⚠️ No active session in this channel.');
+        return;
+      }
+
+      const usage = await sessionManager.getContextUsage(sessionId);
+      if (!usage) {
+        await interaction.reply('⚠️ No usage data yet — session may still be starting.');
+        return;
+      }
+
+      const pct = ((usage.totalTokens / usage.contextLimit) * 100).toFixed(1);
+      const usedK = Math.round(usage.totalTokens / 1000);
+      const limitK = usage.contextLimit / 1000;
+      await interaction.reply(`📊 **Context:** ${usedK}k / ${limitK}k tokens (${pct}%)`);
     }
   });
 

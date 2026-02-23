@@ -424,6 +424,44 @@ export class SessionManager {
     return filename.replace('.jsonl', '');
   }
 
+  /**
+   * Get context window usage from the last assistant message in the JSONL.
+   * Returns null if no watched file or no usage data found.
+   */
+  async getContextUsage(sessionId: string): Promise<{ inputTokens: number; outputTokens: number; totalTokens: number; contextLimit: number } | null> {
+    const session = this.sessions.get(sessionId);
+    if (!session?.watchedFile) return null;
+
+    try {
+      const content = await readFile(session.watchedFile, 'utf-8');
+      const lines = content.split('\n').filter(Boolean);
+
+      // Iterate backwards to find the last assistant message with usage
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const data = JSON.parse(lines[i]);
+          if (data.type === 'assistant' && data.message?.usage) {
+            const u = data.message.usage;
+            const inputTokens = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+            const outputTokens = u.output_tokens || 0;
+            return {
+              inputTokens,
+              outputTokens,
+              totalTokens: inputTokens,
+              contextLimit: 200_000,
+            };
+          }
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      // File read error
+    }
+
+    return null;
+  }
+
   getAllSessions(): SessionInfo[] {
     return Array.from(this.sessions.values()).map((s) => ({
       id: s.id,
