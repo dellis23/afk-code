@@ -135,6 +135,18 @@ export async function discordRun(): Promise<void> {
     console.log('  POST /send-message    { "channelId": "...", "content": "hello" }');
     console.log('  POST /command         { "channelId": "...", "command": "clear|interrupt|background|mode|compact|model opus" }');
     console.log('  GET  /sessions');
+
+    // Graceful shutdown — kill tmux sessions on exit
+    const shutdown = () => {
+      console.log('\n[AFK Code] Shutting down...');
+      app.stop();
+      process.exit(0);
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+
+    // Keep the process alive
+    await new Promise(() => {});
     return;
   }
 
@@ -207,4 +219,14 @@ export async function discordRun(): Promise<void> {
     console.error('[AFK Code] Failed to start Discord bot:', err);
     process.exit(1);
   }
+
+  // Graceful shutdown — kill tmux sessions on exit
+  const shutdown = () => {
+    console.log('\n[AFK Code] Shutting down...');
+    sessionManager.stop();
+    client.destroy();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }

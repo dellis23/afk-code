@@ -169,6 +169,12 @@ curl -X POST localhost:3000/command \
   -d '{"channelId":"mock-chan-1","command":"clear"}'
 ```
 
+### Testing with mock-discord (for AI agents)
+
+When making changes to session management, Discord integration, or tmux lifecycle code, **use the mock discord system to verify your changes** before considering the task complete. The mock system exercises the same `SessionManager`, channel state persistence, and tmux session lifecycle as the real Discord bot.
+
+Start the mock server with `npm run build && node dist/cli/index.js discord --mock-discord`, then use the HTTP endpoints above to drive the flow. Use `GET /sessions` to inspect state and `tmux ls` to verify tmux session lifecycle. Shut down the server with SIGTERM to test graceful cleanup.
+
 ## How It Works
 
 1. `afk-code slack`, `afk-code discord`, or `afk-code telegram` starts a bot that listens for sessions

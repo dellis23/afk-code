@@ -16,6 +16,7 @@ export interface ChannelState {
   channelName: string;
   cwd: string;
   claudeSessionId: string; // UUID from the JSONL filename
+  sessionId?: string;      // internal 8-char ID (tmux name = afk-<sessionId>)
 }
 
 interface StateFile {

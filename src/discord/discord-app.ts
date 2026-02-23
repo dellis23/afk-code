@@ -1,6 +1,7 @@
 import { Client, GatewayIntentBits, Events, ChannelType, AttachmentBuilder, REST, Routes, SlashCommandBuilder } from 'discord.js';
 import type { TextChannel } from 'discord.js';
 import { randomUUID } from 'crypto';
+import { execSync } from 'child_process';
 import { stat as fsStat } from 'fs/promises';
 import { homedir } from 'os';
 import type { DiscordConfig } from './types.js';
@@ -35,8 +36,10 @@ export function createDiscordApp(config: DiscordConfig) {
   // Persistent state for restoring sessions across bot restarts
   const persistedChannels = new Map<string, ChannelState>();
 
-  async function persistChannelState(channelId: string, channelName: string, cwd: string, claudeSessionId: string): Promise<void> {
-    persistedChannels.set(channelId, { channelId, channelName, cwd, claudeSessionId });
+  async function persistChannelState(channelId: string, channelName: string, cwd: string, claudeSessionId: string, sessionId?: string): Promise<void> {
+    const state: ChannelState = { channelId, channelName, cwd, claudeSessionId };
+    if (sessionId) state.sessionId = sessionId;
+    persistedChannels.set(channelId, state);
     try {
       await saveChannelState(persistedChannels);
     } catch (err) {
@@ -53,7 +56,7 @@ export function createDiscordApp(config: DiscordConfig) {
     }
   }
 
-  async function handleAutoSpawn(channelId: string, channelName: string, cwd: string, options?: { silent?: boolean; resumeSessionId?: string }): Promise<void> {
+  async function handleAutoSpawn(channelId: string, channelName: string, cwd: string, options?: { silent?: boolean; resumeSessionId?: string }): Promise<string | undefined> {
     // Validate path exists and is a directory
     try {
       const stats = await fsStat(cwd);
@@ -64,7 +67,7 @@ export function createDiscordApp(config: DiscordConfig) {
             await discordChannel.send(`\u26a0\ufe0f Path is not a directory: \`${cwd}\`. Update the topic to a valid directory path.`);
           }
         }
-        return;
+        return undefined;
       }
     } catch {
       if (!options?.silent) {
@@ -73,7 +76,7 @@ export function createDiscordApp(config: DiscordConfig) {
           await discordChannel.send(`\u26a0\ufe0f Path does not exist: \`${cwd}\`. Update the topic to a valid directory path.`);
         }
       }
-      return;
+      return undefined;
     }
 
     const sessionId = randomUUID().slice(0, 8);
@@ -83,6 +86,7 @@ export function createDiscordApp(config: DiscordConfig) {
 
     try {
       await sessionManager.spawnSession(sessionId, cwd, { resumeSessionId: options?.resumeSessionId });
+      return sessionId;
     } catch (err: any) {
       console.error(`[Discord] Failed to spawn session for #${channelName}:`, err);
       const discordChannel = await client.channels.fetch(channelId);
@@ -90,6 +94,7 @@ export function createDiscordApp(config: DiscordConfig) {
         await discordChannel.send(`\u274c Failed to spawn Claude session: ${err.message || err}`);
       }
       channelManager.unregisterChannel(sessionId);
+      return undefined;
     }
   }
 
@@ -161,8 +166,8 @@ export function createDiscordApp(config: DiscordConfig) {
           if (!existing || existing.claudeSessionId !== claudeId) {
             const sessionInfo = sessionManager.getSession(sessionId);
             const cwd = sessionInfo?.cwd || homedir();
-            await persistChannelState(channel.channelId, channel.channelName, cwd, claudeId);
-            console.log(`[Discord] Persisted channel state: #${channel.channelName} → Claude session ${claudeId}`);
+            await persistChannelState(channel.channelId, channel.channelName, cwd, claudeId, sessionId);
+            console.log(`[Discord] Persisted channel state: #${channel.channelName} → Claude session ${claudeId} (internal: ${sessionId})`);
           }
         }
 
@@ -403,7 +408,7 @@ export function createDiscordApp(config: DiscordConfig) {
       console.error('[Discord] Failed to register slash commands:', err);
     }
 
-    // Restore sessions for existing claude-* channels
+    // Restore sessions for existing claude-* channels (with tmux orphan recovery)
     const guild = channelManager.getGuild();
     if (guild) {
       try {
@@ -413,6 +418,25 @@ export function createDiscordApp(config: DiscordConfig) {
         for (const [id, state] of savedState) {
           persistedChannels.set(id, state);
         }
+
+        // Discover running tmux sessions so we can re-attach instead of spawning duplicates
+        const runningTmuxSessions = new Set<string>();
+        try {
+          const tmuxOutput = execSync("tmux ls -F '#{session_name}'", { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+          for (const line of tmuxOutput.trim().split('\n')) {
+            const name = line.trim();
+            if (name.startsWith('afk-')) {
+              runningTmuxSessions.add(name.slice(4)); // strip 'afk-' prefix → sessionId
+            }
+          }
+          console.log(`[Discord] Found ${runningTmuxSessions.size} running afk-* tmux session(s)`);
+        } catch {
+          // tmux not running or no sessions — that's fine
+          console.log('[Discord] No running tmux sessions found');
+        }
+
+        // Track which tmux sessions get claimed during restore
+        const claimedTmuxSessions = new Set<string>();
 
         const allChannels = await guild.channels.fetch();
         for (const [, channel] of allChannels) {
@@ -426,7 +450,40 @@ export function createDiscordApp(config: DiscordConfig) {
           const topic = (channel as TextChannel).topic?.trim();
           const cwd = (topic && topic.startsWith('/')) ? topic : (saved?.cwd || homedir());
 
-          // Use saved Claude session UUID for --resume if available
+          // Check if we can re-attach to an existing tmux session
+          if (saved?.sessionId && runningTmuxSessions.has(saved.sessionId)) {
+            console.log(`[Discord] Re-attaching to existing tmux session afk-${saved.sessionId} for #${channel.name} in ${cwd}`);
+            claimedTmuxSessions.add(saved.sessionId);
+
+            // Register channel mapping and attach to the live tmux session
+            channelManager.registerExternalChannel(saved.sessionId, channel.id, channel.name, cwd);
+            try {
+              await sessionManager.attachSession(saved.sessionId, cwd);
+              try {
+                await (channel as TextChannel).send(`🔄 **Session re-attached** — bot restarted, reconnected to existing tmux session in \`${cwd}\``);
+              } catch (err) {
+                console.error(`[Discord] Failed to post re-attach message in #${channel.name}:`, err);
+              }
+            } catch (err) {
+              console.error(`[Discord] Failed to attach to tmux session afk-${saved.sessionId}:`, err);
+              channelManager.unregisterChannel(saved.sessionId);
+              // Fall through to normal spawn below
+              const resumeSessionId = saved?.claudeSessionId;
+              console.log(`[Discord] Falling back to spawn for #${channel.name} in ${cwd}`);
+              const newSessionId = await handleAutoSpawn(channel.id, channel.name, cwd, { silent: true, resumeSessionId });
+              if (newSessionId) {
+                await persistChannelState(channel.id, channel.name, cwd, resumeSessionId || '', newSessionId);
+                try {
+                  await (channel as TextChannel).send(`🔄 **Session restored** — bot restarted, conversation resumed in \`${cwd}\``);
+                } catch (err) {
+                  console.error(`[Discord] Failed to post restore message in #${channel.name}:`, err);
+                }
+              }
+            }
+            continue;
+          }
+
+          // No live tmux session — spawn fresh (with --resume if we have a Claude UUID)
           const resumeSessionId = saved?.claudeSessionId;
 
           if (resumeSessionId) {
@@ -435,11 +492,11 @@ export function createDiscordApp(config: DiscordConfig) {
             console.log(`[Discord] Restoring session for #${channel.name} in ${cwd} (fresh — no saved session)`);
           }
 
-          await handleAutoSpawn(channel.id, channel.name, cwd, { silent: true, resumeSessionId });
+          const newSessionId = await handleAutoSpawn(channel.id, channel.name, cwd, { silent: true, resumeSessionId });
 
-          // Only post restore message if spawn succeeded (channel is now mapped)
-          const sessionId = channelManager.getSessionByChannel(channel.id);
-          if (sessionId) {
+          // Persist the new internal session ID so we can find the tmux session on next restart
+          if (newSessionId) {
+            await persistChannelState(channel.id, channel.name, cwd, resumeSessionId || '', newSessionId);
             const msg = resumeSessionId
               ? `🔄 **Session restored** — bot restarted, conversation resumed in \`${cwd}\``
               : `🔄 **Session restored** — bot restarted, new session spawned in \`${cwd}\``;
@@ -448,6 +505,16 @@ export function createDiscordApp(config: DiscordConfig) {
             } catch (err) {
               console.error(`[Discord] Failed to post restore message in #${channel.name}:`, err);
             }
+          }
+        }
+
+        // Kill orphaned tmux sessions that weren't claimed by any channel
+        for (const tmuxSessionId of runningTmuxSessions) {
+          if (!claimedTmuxSessions.has(tmuxSessionId)) {
+            console.log(`[Discord] Killing orphaned tmux session: afk-${tmuxSessionId}`);
+            try {
+              execSync(`tmux kill-session -t afk-${tmuxSessionId}`, { stdio: 'ignore' });
+            } catch {}
           }
         }
       } catch (err) {
@@ -600,7 +667,10 @@ export function createDiscordApp(config: DiscordConfig) {
 
     const home = homedir();
     console.log(`[Discord] Detected claude-* channel creation: #${channel.name}, spawning in ${home}`);
-    await handleAutoSpawn(channel.id, channel.name, home);
+    const newSessionId = await handleAutoSpawn(channel.id, channel.name, home);
+    if (newSessionId) {
+      await persistChannelState(channel.id, channel.name, home, '', newSessionId);
+    }
     spawningChannels.delete(channel.id);
   });
 
@@ -638,7 +708,10 @@ export function createDiscordApp(config: DiscordConfig) {
     }
 
     console.log(`[Discord] Spawning new session for #${newChannel.name} in ${cwd}`);
-    await handleAutoSpawn(newChannel.id, newChannel.name, cwd);
+    const newSessionId = await handleAutoSpawn(newChannel.id, newChannel.name, cwd);
+    if (newSessionId) {
+      await persistChannelState(newChannel.id, newChannel.name, cwd, '', newSessionId);
+    }
     spawningChannels.delete(newChannel.id);
   });
 

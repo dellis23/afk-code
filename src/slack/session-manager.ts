@@ -148,6 +148,9 @@ export class SessionManager {
         try {
           session.pty.kill();
         } catch {}
+        try {
+          execSync(`tmux kill-session -t afk-${session.id}`, { stdio: 'ignore' });
+        } catch {}
       }
     }
     this.sessions.clear();
@@ -212,6 +215,74 @@ export class SessionManager {
 
     ptyProcess.onExit(() => {
       console.log(`[SessionManager] Local session exited: ${sessionId}`);
+      this.stopWatching(session);
+      this.sessions.delete(sessionId);
+      this.events.onSessionEnd(sessionId);
+    });
+
+    this.events.onSessionStart({
+      id: session.id,
+      name: session.name,
+      cwd: session.cwd,
+      projectDir: session.projectDir,
+      status: session.status,
+      startedAt: session.startedAt,
+    });
+
+    this.startWatching(session);
+  }
+
+  /**
+   * Attach to an existing tmux session instead of spawning a new one.
+   * Used for orphan recovery on restart — re-uses a live tmux session
+   * so we don't spawn a duplicate Claude process.
+   */
+  async attachSession(sessionId: string, cwd: string): Promise<void> {
+    const pty = await import('node-pty');
+    cwd = cwd.replace(/\/+$/, '') || '/';
+    const projectDir = getClaudeProjectDir(cwd);
+
+    const tmuxSessionName = `afk-${sessionId}`;
+
+    // Strip Claude-related env vars
+    const env = { ...process.env };
+    delete env.CLAUDECODE;
+    delete env.CLAUDE_CODE_ENTRYPOINT;
+
+    const ptyProcess = pty.spawn('tmux', ['attach-session', '-t', tmuxSessionName], {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 40,
+      cwd,
+      env: env as Record<string, string>,
+    });
+
+    // Snapshot existing JSONL files — we'll look for the most recent one
+    const initialFileStats = await this.snapshotJsonlFiles(projectDir);
+
+    const session: InternalSession = {
+      id: sessionId,
+      name: `claude-${sessionId}`,
+      cwd,
+      projectDir,
+      pty: ptyProcess,
+      status: 'running',
+      seenMessages: new Set(),
+      startedAt: new Date(0), // epoch so we don't skip existing messages
+      slugFound: false,
+      lastTodosHash: '',
+      inPlanMode: false,
+      initialFileStats,
+    };
+
+    this.sessions.set(sessionId, session);
+    console.log(`[SessionManager] Attached to existing tmux session: ${tmuxSessionName} in ${cwd}`);
+
+    // Drain PTY output
+    ptyProcess.onData(() => {});
+
+    ptyProcess.onExit(() => {
+      console.log(`[SessionManager] Attached session exited: ${sessionId}`);
       this.stopWatching(session);
       this.sessions.delete(sessionId);
       this.events.onSessionEnd(sessionId);
