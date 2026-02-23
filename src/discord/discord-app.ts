@@ -2,8 +2,9 @@ import { Client, GatewayIntentBits, Events, ChannelType, AttachmentBuilder, REST
 import type { TextChannel } from 'discord.js';
 import { randomUUID } from 'crypto';
 import { execSync } from 'child_process';
-import { stat as fsStat } from 'fs/promises';
+import { stat as fsStat, mkdir, writeFile } from 'fs/promises';
 import { homedir } from 'os';
+import { join } from 'path';
 import type { DiscordConfig } from './types.js';
 import { SessionManager, type SessionInfo, type ToolCallInfo, type ToolResultInfo } from '../slack/session-manager.js';
 import { ChannelManager } from './channel-manager.js';
@@ -332,6 +333,20 @@ export function createDiscordApp(config: DiscordConfig) {
     },
   });
 
+  // Download a Discord attachment to ~/.afk-code/attachments/ and return the local path
+  const ATTACHMENTS_DIR = join(homedir(), '.afk-code', 'attachments');
+  async function downloadAttachment(url: string, filename: string): Promise<string> {
+    await mkdir(ATTACHMENTS_DIR, { recursive: true });
+    const prefix = randomUUID().slice(0, 8);
+    const localName = `${prefix}-${filename}`;
+    const localPath = join(ATTACHMENTS_DIR, localName);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    await writeFile(localPath, buffer);
+    return localPath;
+  }
+
   // Handle messages in session channels (user sending input to Claude)
   client.on(Events.MessageCreate, async (message) => {
     // Ignore bot's own messages
@@ -352,14 +367,33 @@ export function createDiscordApp(config: DiscordConfig) {
       return;
     }
 
-    console.log(`[Discord] Sending input to session ${sessionId}: ${message.content.slice(0, 50)}...`);
+    // Download any attachments and build the full message
+    let fullContent = message.content;
+    if (message.attachments.size > 0) {
+      const savedPaths: string[] = [];
+      for (const [, attachment] of message.attachments) {
+        try {
+          const localPath = await downloadAttachment(attachment.url, attachment.name);
+          savedPaths.push(localPath);
+          console.log(`[Discord] Saved attachment: ${attachment.name} → ${localPath}`);
+        } catch (err) {
+          console.error(`[Discord] Failed to download attachment ${attachment.name}:`, err);
+          await message.reply(`⚠️ Failed to download attachment: ${attachment.name}`);
+        }
+      }
+      if (savedPaths.length > 0) {
+        fullContent += '\nAttachment(s):\n' + savedPaths.join('\n');
+      }
+    }
+
+    console.log(`[Discord] Sending input to session ${sessionId}: ${fullContent.slice(0, 50)}...`);
 
     // Track this message so we don't re-post it
-    discordSentMessages.add(message.content.trim());
+    discordSentMessages.add(fullContent.trim());
 
-    const sent = sessionManager.sendInput(sessionId, message.content);
+    const sent = sessionManager.sendInput(sessionId, fullContent);
     if (!sent) {
-      discordSentMessages.delete(message.content.trim());
+      discordSentMessages.delete(fullContent.trim());
       await message.reply('⚠️ Failed to send input - session not connected.');
     }
   });

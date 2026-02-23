@@ -5,9 +5,10 @@
 
 import { createServer } from 'http';
 import { execSync } from 'child_process';
-import { stat } from 'fs/promises';
+import { stat, mkdir, copyFile } from 'fs/promises';
 import { randomUUID } from 'crypto';
 import { homedir } from 'os';
+import { join, basename } from 'path';
 import { SessionManager } from '../slack/session-manager.js';
 import { loadChannelState, saveChannelState, type ChannelState } from './channel-state.js';
 import { chunkMessage, formatSessionStatus, formatTodos } from '../slack/message-formatter.js';
@@ -243,9 +244,9 @@ export function createMockDiscordApp(port: number) {
       }
 
       if (req.method === 'POST' && url === '/send-message') {
-        const { channelId, content } = body;
-        if (!channelId || !content) {
-          return json(res, 400, { error: 'Missing "channelId" or "content"' });
+        const { channelId, content, attachments } = body;
+        if (!channelId || (!content && !attachments)) {
+          return json(res, 400, { error: 'Missing "channelId" and "content" or "attachments"' });
         }
 
         const sessionId = channelToSession.get(channelId);
@@ -253,8 +254,31 @@ export function createMockDiscordApp(port: number) {
           return json(res, 404, { error: 'No session for this channel' });
         }
 
-        const sent = sessionManager.sendInput(sessionId, content);
-        return json(res, sent ? 200 : 500, { ok: sent });
+        // Handle attachments: copy local files to ~/.afk-code/attachments/
+        let fullContent = content || '';
+        const savedPaths: string[] = [];
+        if (Array.isArray(attachments)) {
+          const attachDir = join(homedir(), '.afk-code', 'attachments');
+          await mkdir(attachDir, { recursive: true });
+          for (const filePath of attachments) {
+            try {
+              const prefix = randomUUID().slice(0, 8);
+              const name = basename(filePath);
+              const dest = join(attachDir, `${prefix}-${name}`);
+              await copyFile(filePath, dest);
+              savedPaths.push(dest);
+              console.log(`[mock-discord] Saved attachment: ${name} → ${dest}`);
+            } catch (err: any) {
+              console.error(`[mock-discord] Failed to copy attachment ${filePath}:`, err.message);
+            }
+          }
+          if (savedPaths.length > 0) {
+            fullContent += '\nAttachment(s):\n' + savedPaths.join('\n');
+          }
+        }
+
+        const sent = sessionManager.sendInput(sessionId, fullContent);
+        return json(res, sent ? 200 : 500, { ok: sent, attachments: savedPaths.length > 0 ? savedPaths : undefined });
       }
 
       if (req.method === 'POST' && url === '/command') {
