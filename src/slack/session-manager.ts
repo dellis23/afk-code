@@ -7,6 +7,7 @@ import { watch, type FSWatcher } from 'fs';
 import { readdir, readFile, stat, unlink, mkdir, writeFile } from 'fs/promises';
 import { createServer, type Server, type Socket } from 'net';
 import { createHash, randomBytes, randomUUID } from 'crypto';
+import { execSync } from 'child_process';
 import { homedir } from 'os';
 import { join } from 'path';
 import type { IPty } from 'node-pty';
@@ -161,10 +162,14 @@ export class SessionManager {
     cwd = cwd.replace(/\/+$/, '') || '/';
     const projectDir = getClaudeProjectDir(cwd);
 
-    const command = ['claude', '--dangerously-skip-permissions'];
+    const claudeArgs = ['--dangerously-skip-permissions'];
     if (options?.resumeSessionId) {
-      command.push('--resume', options.resumeSessionId);
+      claudeArgs.push('--resume', options.resumeSessionId);
     }
+
+    // Wrap in tmux so we can `tmux attach -t afk-<id>` to inspect/debug
+    const tmuxSessionName = `afk-${sessionId}`;
+    const command = ['tmux', 'new-session', '-s', tmuxSessionName, '--', 'claude', ...claudeArgs];
 
     // Strip Claude-related env vars so the child process doesn't think
     // it's nested inside another Claude session
@@ -199,7 +204,7 @@ export class SessionManager {
     };
 
     this.sessions.set(sessionId, session);
-    console.log(`[SessionManager] Spawned local session: ${sessionId} in ${cwd}`);
+    console.log(`[SessionManager] Spawned local session: ${sessionId} in ${cwd} (tmux: ${tmuxSessionName})`);
 
     // Drain PTY output to prevent the buffer from filling up and blocking Claude.
     // The actual conversation data comes from JSONL file watching, not PTY output.
@@ -250,6 +255,10 @@ export class SessionManager {
     if (session.pty) {
       try {
         session.pty.kill();
+      } catch {}
+      // Clean up the tmux session as a safety net
+      try {
+        execSync(`tmux kill-session -t afk-${sessionId}`, { stdio: 'ignore' });
       } catch {}
     }
 
