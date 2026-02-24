@@ -321,6 +321,8 @@ export function createMockDiscordApp(port: number) {
           const usedK = Math.round(usage.totalTokens / 1000);
           const limitK = usage.contextLimit / 1000;
           return json(res, 200, { ok: true, command, usedK, limitK, percent: pct, ...usage });
+        } else if (cmd === 'tmux') {
+          return json(res, 200, { ok: true, command, attach: `tmux attach -t afk-${sessionId}` });
         } else {
           return json(res, 400, { error: `Unknown command: ${command}` });
         }

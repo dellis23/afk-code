@@ -636,6 +636,26 @@ export class SessionManager {
         if (session.seenMessages.has(lineHash)) continue;
         session.seenMessages.add(lineHash);
 
+        // Skip lines older than session start (avoid replaying history on --resume)
+        // Always extract slug/name regardless of timestamp so the channel gets named
+        try {
+          const data = JSON.parse(line);
+          if (data.timestamp) {
+            const lineTime = new Date(data.timestamp);
+            if (lineTime < session.startedAt) {
+              // Still extract slug from old lines so channel name is set
+              if (!session.slugFound && data.slug) {
+                session.slugFound = true;
+                session.name = data.slug;
+                this.events.onSessionUpdate(session.id, data.slug);
+              }
+              continue;
+            }
+          }
+        } catch {
+          // Not valid JSON — skip timestamp check, process normally
+        }
+
         // Extract session name (slug)
         if (!session.slugFound) {
           const slug = this.extractSlug(line);
@@ -680,9 +700,6 @@ export class SessionManager {
         // Parse and forward messages
         const parsed = this.parseJsonlLine(line);
         if (parsed) {
-          const messageTime = new Date(parsed.timestamp);
-          if (messageTime < session.startedAt) continue;
-
           this.events.onMessage(session.id, parsed.role, parsed.content);
         }
       }

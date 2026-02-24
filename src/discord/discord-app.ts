@@ -186,7 +186,7 @@ export function createDiscordApp(config: DiscordConfig) {
           // User message from terminal
           const discordChannel = await client.channels.fetch(channel.channelId);
           if (discordChannel?.type === ChannelType.GuildText) {
-            const chunks = chunkMessage(formatted);
+            const chunks = chunkMessage(formatted, 1900);
             for (const chunk of chunks) {
               await discordChannel.send(`**User:** ${chunk}`);
             }
@@ -195,7 +195,7 @@ export function createDiscordApp(config: DiscordConfig) {
           // Claude's response
           const discordChannel = await client.channels.fetch(channel.channelId);
           if (discordChannel?.type === ChannelType.GuildText) {
-            const chunks = chunkMessage(formatted);
+            const chunks = chunkMessage(formatted, 2000);
             for (const chunk of chunks) {
               await discordChannel.send(chunk);
             }
@@ -433,6 +433,9 @@ export function createDiscordApp(config: DiscordConfig) {
       new SlashCommandBuilder()
         .setName('context')
         .setDescription('Show context window usage for this session'),
+      new SlashCommandBuilder()
+        .setName('tmux')
+        .setDescription('Get tmux attach command for this session'),
     ];
 
     try {
@@ -709,6 +712,16 @@ export function createDiscordApp(config: DiscordConfig) {
       const usedK = Math.round(usage.totalTokens / 1000);
       const limitK = usage.contextLimit / 1000;
       await interaction.reply(`📊 **Context:** ${usedK}k / ${limitK}k tokens (${pct}%)`);
+    }
+
+    if (commandName === 'tmux') {
+      const sessionId = channelManager.getSessionByChannel(channelId);
+      if (!sessionId) {
+        await interaction.reply('⚠️ No active session in this channel.');
+        return;
+      }
+
+      await interaction.reply(`\`\`\`\ntmux attach -t afk-${sessionId}\n\`\`\``);
     }
   });
 
