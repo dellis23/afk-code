@@ -417,6 +417,20 @@ export function createTelegramApp(config: TelegramConfig) {
         break;
       }
 
+      case '/screenshot': {
+        if (!targetSession) {
+          await ctx.reply('No active session.');
+          return;
+        }
+        try {
+          const paneText = sessionManager.capturePane(targetSession.sessionId);
+          await bot.api.sendDocument(config.chatId, new InputFile(Buffer.from(paneText, 'utf-8'), 'screenshot.txt'));
+        } catch {
+          await ctx.reply('Failed to capture tmux pane.');
+        }
+        break;
+      }
+
       case '/help': {
         await ctx.reply(
           `*AFK Code Commands:*\n\n` +
@@ -424,6 +438,7 @@ export function createTelegramApp(config: TelegramConfig) {
             `/switch <name> - Switch to a session\n` +
             `/model <name> - Switch model\n` +
             `/compact - Compact conversation\n` +
+            `/screenshot - Capture tmux pane\n` +
             `/background - Send Ctrl+B\n` +
             `/interrupt - Send Escape\n` +
             `/mode - Toggle mode (Shift+Tab)\n` +

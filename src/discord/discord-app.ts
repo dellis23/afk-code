@@ -436,6 +436,9 @@ export function createDiscordApp(config: DiscordConfig) {
       new SlashCommandBuilder()
         .setName('tmux')
         .setDescription('Get tmux attach command for this session'),
+      new SlashCommandBuilder()
+        .setName('screenshot')
+        .setDescription('Capture current tmux pane content'),
     ];
 
     try {
@@ -722,6 +725,22 @@ export function createDiscordApp(config: DiscordConfig) {
       }
 
       await interaction.reply(`\`\`\`\ntmux attach -t afk-${sessionId}\n\`\`\``);
+    }
+
+    if (commandName === 'screenshot') {
+      const sessionId = channelManager.getSessionByChannel(channelId);
+      if (!sessionId) {
+        await interaction.reply('⚠️ No active session in this channel.');
+        return;
+      }
+
+      try {
+        const paneText = sessionManager.capturePane(sessionId);
+        const attachment = new AttachmentBuilder(Buffer.from(paneText, 'utf-8'), { name: 'screenshot.txt' });
+        await interaction.reply({ files: [attachment] });
+      } catch {
+        await interaction.reply('⚠️ Failed to capture tmux pane.');
+      }
     }
   });
 

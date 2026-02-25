@@ -118,6 +118,7 @@ afk-code help                    Show help
 | `/background` | ✓ | ✓ | ✓ | Send Ctrl+B (background mode) |
 | `/interrupt` | ✓ | ✓ | ✓ | Send Escape (interrupt) |
 | `/mode` | ✓ | ✓ | ✓ | Toggle mode (Shift+Tab) |
+| `/screenshot` | ✓ | ✓ | ✓ | Capture tmux pane as text file |
 
 ## Installation Options
 

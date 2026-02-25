@@ -466,6 +466,14 @@ export class SessionManager {
     return null;
   }
 
+  capturePane(sessionId: string): string {
+    try {
+      return execSync(`tmux capture-pane -p -t afk-${sessionId}`, { encoding: 'utf-8' });
+    } catch (err) {
+      throw new Error(`Failed to capture pane for session ${sessionId}`);
+    }
+  }
+
   getAllSessions(): SessionInfo[] {
     return Array.from(this.sessions.values()).map((s) => ({
       id: s.id,

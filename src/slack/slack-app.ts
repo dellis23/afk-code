@@ -460,6 +460,39 @@ export function createSlackApp(config: SlackConfig) {
     }
   });
 
+  // Slash command: /screenshot - Capture tmux pane content
+  app.command('/screenshot', async ({ command, ack, respond }) => {
+    await ack();
+    if (command.user_id !== config.userId) {
+      await respond(':warning: You are not authorized to use this command.');
+      return;
+    }
+
+    const sessionId = channelManager.getSessionByChannel(command.channel_id);
+    if (!sessionId) {
+      await respond(':warning: This channel is not associated with an active session.');
+      return;
+    }
+
+    const channel = channelManager.getChannel(sessionId);
+    if (!channel || channel.status === 'ended') {
+      await respond(':warning: This session has ended.');
+      return;
+    }
+
+    try {
+      const paneText = sessionManager.capturePane(sessionId);
+      await app.client.files.uploadV2({
+        channel_id: command.channel_id,
+        content: paneText,
+        filename: 'screenshot.txt',
+        initial_comment: ':camera: Tmux pane capture',
+      });
+    } catch {
+      await respond(':warning: Failed to capture tmux pane.');
+    }
+  });
+
   // App Home tab
   app.event('app_home_opened', async ({ event, client }) => {
     const active = channelManager.getAllActive();

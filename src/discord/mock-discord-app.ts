@@ -323,6 +323,13 @@ export function createMockDiscordApp(port: number) {
           return json(res, 200, { ok: true, command, usedK, limitK, percent: pct, ...usage });
         } else if (cmd === 'tmux') {
           return json(res, 200, { ok: true, command, attach: `tmux attach -t afk-${sessionId}` });
+        } else if (cmd === 'screenshot') {
+          try {
+            const paneText = sessionManager.capturePane(sessionId);
+            return json(res, 200, { ok: true, command, paneText });
+          } catch {
+            return json(res, 500, { ok: false, command, error: 'Failed to capture tmux pane' });
+          }
         } else {
           return json(res, 400, { error: `Unknown command: ${command}` });
         }
