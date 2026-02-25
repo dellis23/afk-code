@@ -359,13 +359,16 @@ export class SessionManager {
         return false;
       }
 
+      // Scale delay based on text length — Claude Code needs time to process
+      // long pastes before it's ready to receive Enter
+      const delay = Math.min(50 + sanitizedText.length, 2000);
       setTimeout(() => {
         try {
           session.pty?.write('\r');
         } catch {
           // PTY likely already dead
         }
-      }, 50);
+      }, delay);
 
       return true;
     }
