@@ -359,9 +359,10 @@ export class SessionManager {
         return false;
       }
 
-      // Scale delay based on text length — Claude Code needs time to process
-      // long pastes before it's ready to receive Enter
-      const delay = Math.min(50 + sanitizedText.length, 2000);
+      // Scale delay for long pastes — Claude Code needs time to process
+      // "[pasted text]" before it's ready to receive Enter.
+      // Short messages keep the original 50ms; only scale above 500 chars.
+      const delay = Math.min(50 + Math.max(0, sanitizedText.length - 500), 2000);
       setTimeout(() => {
         try {
           session.pty?.write('\r');
