@@ -20,6 +20,7 @@ interface MockChannel {
   name: string;
   topic?: string;
   sessionId?: string;
+  archived?: boolean;
 }
 
 function parseBody(req: import('http').IncomingMessage): Promise<any> {
@@ -47,6 +48,7 @@ export function createMockDiscordApp(port: number) {
   const channelToSession = new Map<string, string>();
   const sessionToChannel = new Map<string, string>();
   const persistedChannels = new Map<string, ChannelState>();
+  const respawningChannels = new Set<string>(); // channelIds mid-respawn
   let channelCounter = 0;
 
   function channelName(channelId: string): string {
@@ -68,6 +70,9 @@ export function createMockDiscordApp(port: number) {
     onSessionEnd: async (sessionId) => {
       const chId = sessionToChannel.get(sessionId);
       if (chId) {
+        const ch = channels.get(chId);
+        if (ch?.archived) return; // archived via /archive — don't log "ended"
+        if (respawningChannels.has(chId)) return; // mid-respawn — don't interfere
         log(chId, '🛑 **Session ended**');
       }
     },
@@ -89,6 +94,17 @@ export function createMockDiscordApp(port: number) {
     onMessage: async (sessionId, role, content) => {
       const chId = sessionToChannel.get(sessionId);
       if (!chId) return;
+
+      // Persist the Claude session UUID once it's known
+      const claudeId = sessionManager.getClaudeSessionId(sessionId);
+      if (claudeId) {
+        const existing = persistedChannels.get(chId);
+        if (existing && existing.claudeSessionId !== claudeId) {
+          existing.claudeSessionId = claudeId;
+          saveChannelState(persistedChannels).catch(err => console.error('[mock-discord] Failed to save state:', err));
+          console.log(`[mock-discord] Persisted Claude session UUID: ${claudeId} for channel ${chId}`);
+        }
+      }
 
       if (role === 'user') {
         log(chId, `[user] ${content.slice(0, 200)}`);
@@ -249,12 +265,7 @@ export function createMockDiscordApp(port: number) {
           return json(res, 400, { error: 'Missing "channelId" and "content" or "attachments"' });
         }
 
-        const sessionId = channelToSession.get(channelId);
-        if (!sessionId) {
-          return json(res, 404, { error: 'No session for this channel' });
-        }
-
-        // Handle attachments: copy local files to ~/.afk-code/attachments/
+        // Build full content with attachments
         let fullContent = content || '';
         const savedPaths: string[] = [];
         if (Array.isArray(attachments)) {
@@ -275,6 +286,61 @@ export function createMockDiscordApp(port: number) {
           if (savedPaths.length > 0) {
             fullContent += '\nAttachment(s):\n' + savedPaths.join('\n');
           }
+        }
+
+        // Check if channel is archived — re-spawn session
+        const channel = channels.get(channelId);
+        if (channel?.archived) {
+          respawningChannels.add(channelId);
+          const oldSessionId = channelToSession.get(channelId);
+          const saved = persistedChannels.get(channelId);
+          const cwd = channel.topic || saved?.cwd || homedir();
+          const resumeSessionId = saved?.claudeSessionId;
+          const cleanName = channel.name.replace(/-archived$/, '');
+
+          // Clean up old mappings
+          if (oldSessionId) {
+            sessionToChannel.delete(oldSessionId);
+            channelToSession.delete(channelId);
+          }
+
+          // Spawn new session with --resume
+          const newSessionId = randomUUID().slice(0, 8);
+          channel.sessionId = newSessionId;
+          channel.name = cleanName;
+          channel.archived = false;
+          channelToSession.set(channelId, newSessionId);
+          sessionToChannel.set(newSessionId, channelId);
+
+          console.log(`[mock-discord] Re-spawning session ${newSessionId} for archived channel #${channel.name} in ${cwd}`);
+
+          try {
+            await sessionManager.spawnSession(newSessionId, cwd, { resumeSessionId });
+            await sessionManager.waitForReady(newSessionId);
+            // Extra buffer — Claude's input handler needs a moment after the prompt appears
+            await new Promise(r => setTimeout(r, 1000));
+
+            // Send the message
+            const sent = sessionManager.sendInput(newSessionId, fullContent);
+
+            // Update persisted state
+            persistedChannels.set(channelId, { channelId, channelName: cleanName, cwd, claudeSessionId: resumeSessionId || '', sessionId: newSessionId });
+            saveChannelState(persistedChannels).catch(err => console.error('[mock-discord] Failed to save state:', err));
+
+            respawningChannels.delete(channelId);
+            return json(res, 200, { ok: sent, resumed: true, newSessionId, attachments: savedPaths.length > 0 ? savedPaths : undefined });
+          } catch (err: any) {
+            channel.sessionId = undefined;
+            channelToSession.delete(channelId);
+            sessionToChannel.delete(newSessionId);
+            respawningChannels.delete(channelId);
+            return json(res, 500, { error: `Failed to re-spawn: ${err.message || err}` });
+          }
+        }
+
+        const sessionId = channelToSession.get(channelId);
+        if (!sessionId) {
+          return json(res, 404, { error: 'No session for this channel' });
         }
 
         const sent = sessionManager.sendInput(sessionId, fullContent);
@@ -330,6 +396,20 @@ export function createMockDiscordApp(port: number) {
           } catch {
             return json(res, 500, { ok: false, command, error: 'Failed to capture tmux pane' });
           }
+        } else if (cmd === 'archive') {
+          const channel = channels.get(channelId);
+          if (channel?.archived) {
+            return json(res, 400, { error: 'Channel is already archived' });
+          }
+
+          // Rename channel, mark archived, kill session (keep mappings for re-spawn)
+          if (channel) {
+            channel.name = `${channel.name}-archived`;
+            channel.archived = true;
+          }
+          console.log(`[mock-discord] #${channel?.name} → 📦 Session archived. Send a message to resume.`);
+          sessionManager.killSession(sessionId);
+          return json(res, 200, { ok: true, command, channelId, sessionId, message: 'Session archived. Send a message to resume.' });
         } else {
           return json(res, 400, { error: `Unknown command: ${command}` });
         }
@@ -384,7 +464,7 @@ export function createMockDiscordApp(port: number) {
           'POST /change-topic': { body: '{ "channelId": "...", "topic": "/path/to/dir" }' },
           'POST /delete-channel': { body: '{ "channelId": "..." }' },
           'POST /send-message': { body: '{ "channelId": "...", "content": "hello" }' },
-          'POST /command': { body: '{ "channelId": "...", "command": "clear|interrupt|background|mode|compact|model opus" }' },
+          'POST /command': { body: '{ "channelId": "...", "command": "clear|interrupt|background|mode|compact|model opus|archive" }' },
           'GET /sessions': 'List all sessions and channels',
         },
       });

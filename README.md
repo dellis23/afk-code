@@ -119,6 +119,7 @@ afk-code help                    Show help
 | `/interrupt` | ✓ | ✓ | ✓ | Send Escape (interrupt) |
 | `/mode` | ✓ | ✓ | ✓ | Toggle mode (Shift+Tab) |
 | `/screenshot` | ✓ | ✓ | ✓ | Capture tmux pane as text file |
+| `/archive` | - | ✓ | - | Archive session — send a message to resume |
 
 ## Installation Options
 

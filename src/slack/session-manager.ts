@@ -500,6 +500,26 @@ export class SessionManager {
     }, 500);
   }
 
+  /**
+   * Wait until Claude is ready for input by polling the tmux pane.
+   * Resolves when the prompt appears (or on timeout — best-effort).
+   */
+  async waitForReady(sessionId: string): Promise<void> {
+    const maxAttempts = 30; // 30 × 500ms = 15s
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const pane = execSync(`tmux capture-pane -p -t afk-${sessionId}`, { encoding: 'utf-8' });
+        if (pane.includes('❯') && !pane.includes('Yes, I trust this folder')) {
+          return;
+        }
+      } catch {
+        // tmux session may not be ready yet
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+    // Timeout — resolve anyway (Claude will buffer input)
+  }
+
   capturePane(sessionId: string): string {
     try {
       return execSync(`tmux capture-pane -p -t afk-${sessionId}`, { encoding: 'utf-8' });

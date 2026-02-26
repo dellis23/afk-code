@@ -34,6 +34,12 @@ export function createDiscordApp(config: DiscordConfig) {
   // Guard against concurrent spawn attempts on the same channel
   const spawningChannels = new Set<string>(); // channelId
 
+  // Queue messages while an archived channel is re-spawning
+  const pendingMessages = new Map<string, string[]>(); // channelId → messages
+
+  // Channels currently being re-spawned from archive — suppress onSessionEnd
+  const respawningChannels = new Set<string>(); // channelId
+
   // Persistent state for restoring sessions across bot restarts
   const persistedChannels = new Map<string, ChannelState>();
 
@@ -120,6 +126,11 @@ export function createDiscordApp(config: DiscordConfig) {
     onSessionEnd: async (sessionId) => {
       const channel = channelManager.getChannel(sessionId);
       if (channel) {
+        // If the session was archived via /archive, don't overwrite with "session ended"
+        if (channel.status === 'archived') return;
+        // If the channel is mid-respawn, don't interfere
+        if (respawningChannels.has(channel.channelId)) return;
+
         channelManager.updateStatus(sessionId, 'ended');
 
         try {
@@ -152,14 +163,14 @@ export function createDiscordApp(config: DiscordConfig) {
 
     onSessionStatus: async (sessionId, status) => {
       const channel = channelManager.getChannel(sessionId);
-      if (channel) {
+      if (channel && channel.status !== 'archived') {
         channelManager.updateStatus(sessionId, status);
       }
     },
 
     onMessage: async (sessionId, role, content) => {
       const channel = channelManager.getChannel(sessionId);
-      if (channel) {
+      if (channel && channel.status !== 'archived') {
         // Persist the Claude session UUID once it's known (or update if changed after /clear)
         const claudeId = sessionManager.getClaudeSessionId(sessionId);
         if (claudeId) {
@@ -367,7 +378,7 @@ export function createDiscordApp(config: DiscordConfig) {
       return;
     }
 
-    // Download any attachments and build the full message
+    // Build full message content (with attachments) — needed for both active and archived paths
     let fullContent = message.content;
     if (message.attachments.size > 0) {
       const savedPaths: string[] = [];
@@ -384,6 +395,64 @@ export function createDiscordApp(config: DiscordConfig) {
       if (savedPaths.length > 0) {
         fullContent += '\nAttachment(s):\n' + savedPaths.join('\n');
       }
+    }
+
+    // Re-spawn archived sessions on message
+    if (channel.status === 'archived') {
+      // Queue the message
+      if (!pendingMessages.has(message.channelId)) {
+        pendingMessages.set(message.channelId, []);
+      }
+      pendingMessages.get(message.channelId)!.push(fullContent);
+
+      // If already spawning, just queue and return
+      if (spawningChannels.has(message.channelId)) return;
+      spawningChannels.add(message.channelId);
+      respawningChannels.add(message.channelId);
+
+      await message.reply('🔄 **Resuming session...**');
+
+      // Look up persisted state for claudeSessionId and cwd
+      const saved = persistedChannels.get(message.channelId);
+      const cwd = saved?.cwd || homedir();
+      const resumeSessionId = saved?.claudeSessionId;
+
+      // Strip -archived suffix for the clean channel name
+      const cleanChannelName = channel.channelName.replace(/-archived$/, '');
+
+      // Unregister stale mapping
+      channelManager.unregisterChannel(sessionId);
+
+      // Spawn fresh session with --resume (use clean name, not archived name)
+      const newSessionId = await handleAutoSpawn(message.channelId, cleanChannelName, cwd, { resumeSessionId });
+
+      if (newSessionId) {
+        // Rename channel back to active (must happen AFTER registerExternalChannel
+        // which already happened inside handleAutoSpawn)
+        await channelManager.renameChannelActive(newSessionId);
+
+        // Wait for Claude to be ready
+        await sessionManager.waitForReady(newSessionId);
+        // Extra buffer — Claude's input handler needs a moment after the prompt appears
+        await new Promise(r => setTimeout(r, 1000));
+
+        // Flush pending messages
+        const queued = pendingMessages.get(message.channelId) || [];
+        for (const msg of queued) {
+          discordSentMessages.add(msg.trim());
+          sessionManager.sendInput(newSessionId, msg);
+          // Small delay between messages to avoid overwhelming the PTY
+          await new Promise(r => setTimeout(r, 200));
+        }
+
+        // Update persisted state
+        await persistChannelState(message.channelId, cleanChannelName, cwd, resumeSessionId || '', newSessionId);
+      }
+
+      pendingMessages.delete(message.channelId);
+      spawningChannels.delete(message.channelId);
+      respawningChannels.delete(message.channelId);
+      return;
     }
 
     console.log(`[Discord] Sending input to session ${sessionId}: ${fullContent.slice(0, 50)}...`);
@@ -439,6 +508,9 @@ export function createDiscordApp(config: DiscordConfig) {
       new SlashCommandBuilder()
         .setName('screenshot')
         .setDescription('Capture current tmux pane content'),
+      new SlashCommandBuilder()
+        .setName('archive')
+        .setDescription('Archive session — kill Claude but keep the channel for later'),
     ];
 
     try {
@@ -485,6 +557,17 @@ export function createDiscordApp(config: DiscordConfig) {
         for (const [, channel] of allChannels) {
           if (!channel || channel.type !== ChannelType.GuildText) continue;
           if (!channel.name.startsWith('claude-')) continue;
+
+          // Archived channels: register placeholder mapping but don't spawn
+          if (channel.name.endsWith('-archived')) {
+            const saved = persistedChannels.get(channel.id);
+            const cwd = saved?.cwd || homedir();
+            const placeholderId = saved?.sessionId || `archived-${randomUUID().slice(0, 8)}`;
+            channelManager.registerExternalChannel(placeholderId, channel.id, channel.name, cwd);
+            channelManager.updateStatus(placeholderId, 'archived');
+            console.log(`[Discord] Registered archived channel #${channel.name} (no session spawned)`);
+            continue;
+          }
 
           // Look up saved state for this channel
           const saved = persistedChannels.get(channel.id);
@@ -742,6 +825,37 @@ export function createDiscordApp(config: DiscordConfig) {
         await interaction.reply('⚠️ Failed to capture tmux pane.');
       }
     }
+
+    if (commandName === 'archive') {
+      const sessionId = channelManager.getSessionByChannel(channelId);
+      if (!sessionId) {
+        await interaction.reply('⚠️ No active session in this channel.');
+        return;
+      }
+
+      const channel = channelManager.getChannel(sessionId);
+      if (!channel) {
+        await interaction.reply('⚠️ No active session in this channel.');
+        return;
+      }
+      if (channel.status === 'archived') {
+        await interaction.reply('⚠️ This session is already archived.');
+        return;
+      }
+      if (channel.status === 'ended') {
+        await interaction.reply('⚠️ This session has ended.');
+        return;
+      }
+
+      // Mark the channel as spawning to suppress ChannelUpdate from the rename
+      spawningChannels.add(channelId);
+      // Set status before killing so onSessionEnd returns early
+      channelManager.updateStatus(sessionId, 'archived');
+      await channelManager.renameChannelArchived(sessionId);
+      spawningChannels.delete(channelId);
+      await interaction.reply('📦 **Session archived.** Send a message here to resume.');
+      sessionManager.killSession(sessionId);
+    }
   });
 
   // Auto-spawn: immediately spawn a session when a claude-* channel is created
@@ -770,8 +884,10 @@ export function createDiscordApp(config: DiscordConfig) {
     const oldTopic = oldChannel.type === ChannelType.GuildText ? (oldChannel as TextChannel).topic : null;
     const newTopic = (newChannel as TextChannel).topic;
 
-    // Only react to actual topic changes
+    // Only react to actual topic changes — ignore renames (which also fire ChannelUpdate)
     if (!newTopic || newTopic === oldTopic) return;
+    const oldName = oldChannel.type === ChannelType.GuildText ? (oldChannel as TextChannel).name : null;
+    if (oldName !== (newChannel as TextChannel).name) return; // Name changed, not topic
 
     const cwd = newTopic.trim();
     if (!cwd) return;

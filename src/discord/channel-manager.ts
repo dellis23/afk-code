@@ -6,7 +6,7 @@ export interface ChannelMapping {
   channelId: string;
   channelName: string;
   sessionName: string;
-  status: 'running' | 'idle' | 'ended';
+  status: 'running' | 'idle' | 'ended' | 'archived';
   createdAt: Date;
 }
 
@@ -176,7 +176,7 @@ export class ChannelManager {
     return this.channelToSession.get(channelId);
   }
 
-  updateStatus(sessionId: string, status: 'running' | 'idle' | 'ended'): void {
+  updateStatus(sessionId: string, status: 'running' | 'idle' | 'ended' | 'archived'): void {
     const mapping = this.channels.get(sessionId);
     if (mapping) {
       mapping.status = status;
@@ -191,7 +191,7 @@ export class ChannelManager {
   }
 
   getAllActive(): ChannelMapping[] {
-    return Array.from(this.channels.values()).filter((c) => c.status !== 'ended');
+    return Array.from(this.channels.values()).filter((c) => c.status !== 'ended' && c.status !== 'archived');
   }
 
   /**
@@ -199,6 +199,42 @@ export class ChannelManager {
    */
   getGuild(): Guild | null {
     return this.guild;
+  }
+
+  async renameChannelArchived(sessionId: string): Promise<void> {
+    if (!this.guild) return;
+    const mapping = this.channels.get(sessionId);
+    if (!mapping) return;
+
+    try {
+      const channel = await this.guild.channels.fetch(mapping.channelId);
+      if (channel && channel.type === ChannelType.GuildText) {
+        const archivedName = `${mapping.channelName}-archived`.slice(0, 100);
+        await channel.setName(archivedName);
+        mapping.channelName = archivedName;
+        console.log(`[ChannelManager] Renamed channel to #${archivedName}`);
+      }
+    } catch (err: any) {
+      console.error('[ChannelManager] Failed to rename channel archived:', err.message);
+    }
+  }
+
+  async renameChannelActive(sessionId: string): Promise<void> {
+    if (!this.guild) return;
+    const mapping = this.channels.get(sessionId);
+    if (!mapping) return;
+
+    try {
+      const channel = await this.guild.channels.fetch(mapping.channelId);
+      if (channel && channel.type === ChannelType.GuildText) {
+        const activeName = mapping.channelName.replace(/-archived$/, '');
+        await channel.setName(activeName);
+        mapping.channelName = activeName;
+        console.log(`[ChannelManager] Renamed channel to #${activeName}`);
+      }
+    } catch (err: any) {
+      console.error('[ChannelManager] Failed to rename channel active:', err.message);
+    }
   }
 
   /**
