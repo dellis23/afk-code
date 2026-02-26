@@ -38,6 +38,7 @@ interface InternalSession extends SessionInfo {
   lastTodosHash: string;
   inPlanMode: boolean;
   initialFileStats: Map<string, number>; // path -> mtime at session start
+  previousWatchedFiles: Set<string>; // files we've already moved on from
 }
 
 export interface ChatMessage {
@@ -204,6 +205,7 @@ export class SessionManager {
       lastTodosHash: '',
       inPlanMode: false,
       initialFileStats,
+      previousWatchedFiles: new Set(),
     };
 
     this.sessions.set(sessionId, session);
@@ -273,6 +275,7 @@ export class SessionManager {
       lastTodosHash: '',
       inPlanMode: false,
       initialFileStats,
+      previousWatchedFiles: new Set(),
     };
 
     this.sessions.set(sessionId, session);
@@ -774,8 +777,67 @@ export class SessionManager {
 
       if (session.watchedFile) {
         await this.processJsonlUpdates(session);
+
+        // Check if Claude rotated to a new JSONL file (e.g. after compaction/interrupt).
+        // Look for an unclaimed file with the same slug.
+        if (session.slugFound) {
+          const successor = await this.findSuccessorFile(session);
+          if (successor) {
+            console.log(`[SessionManager] Session ${session.id}: Claude rotated JSONL, switching to ${successor}`);
+            session.previousWatchedFiles.add(session.watchedFile);
+            this.claimedFiles.delete(session.watchedFile);
+            session.watchedFile = successor;
+            session.seenMessages.clear();
+            await this.processJsonlUpdates(session);
+          }
+        }
       }
     }, 1000);
+  }
+
+  private async extractSlugFromFile(path: string): Promise<string | null> {
+    try {
+      const content = await readFile(path, 'utf-8');
+      for (const line of content.split('\n')) {
+        if (!line) continue;
+        try {
+          const data = JSON.parse(line);
+          if (data.slug && typeof data.slug === 'string') {
+            return data.slug;
+          }
+        } catch {
+          continue;
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  /**
+   * Look for a newer unclaimed JSONL file in the same project dir that has
+   * the same slug as the current watched file. This handles the case where
+   * Claude Code rotates to a new JSONL mid-session (compaction, interrupt).
+   */
+  private async findSuccessorFile(session: InternalSession): Promise<string | null> {
+    if (!session.watchedFile) return null;
+
+    try {
+      const files = await readdir(session.projectDir);
+      const candidates = files
+        .filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-'))
+        .map((f) => `${session.projectDir}/${f}`)
+        .filter((path) => path !== session.watchedFile && !this.claimedFiles.has(path) && !session.previousWatchedFiles.has(path));
+
+      for (const path of candidates) {
+        const slug = await this.extractSlugFromFile(path);
+        if (slug && slug === session.name) {
+          this.claimedFiles.add(path);
+          return path;
+        }
+      }
+    } catch {}
+
+    return null;
   }
 
   private stopWatching(session: InternalSession): void {
