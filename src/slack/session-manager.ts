@@ -232,6 +232,10 @@ export class SessionManager {
     });
 
     this.startWatching(session);
+
+    // Claude Code shows a workspace trust prompt on first launch.
+    // Auto-dismiss it so the first user message doesn't get eaten.
+    this.dismissTrustPrompt(sessionId, tmuxSessionName);
   }
 
   /**
@@ -467,6 +471,33 @@ export class SessionManager {
     }
 
     return null;
+  }
+
+  /**
+   * Poll the tmux pane for the workspace trust prompt and dismiss it
+   * by sending Enter. Gives up after a few seconds if no prompt appears.
+   */
+  private dismissTrustPrompt(sessionId: string, tmuxSessionName: string): void {
+    let attempts = 0;
+    const maxAttempts = 15; // 15 × 500ms = 7.5s max wait
+    const interval = setInterval(() => {
+      attempts++;
+      if (attempts > maxAttempts || !this.sessions.has(sessionId)) {
+        clearInterval(interval);
+        return;
+      }
+
+      try {
+        const pane = execSync(`tmux capture-pane -p -t ${tmuxSessionName}`, { encoding: 'utf-8' });
+        if (pane.includes('Yes, I trust this folder')) {
+          console.log(`[SessionManager] Dismissing trust prompt for session ${sessionId}`);
+          execSync(`tmux send-keys -t ${tmuxSessionName} Enter`, { stdio: 'ignore' });
+          clearInterval(interval);
+        }
+      } catch {
+        // tmux session may not be ready yet
+      }
+    }, 500);
   }
 
   capturePane(sessionId: string): string {
