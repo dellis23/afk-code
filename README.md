@@ -80,7 +80,7 @@ A new channel is created for each session. Messages relay bidirectionally.
 
 Instead of starting Claude from a terminal, you can create a channel directly in Discord:
 
-1. Create a text channel named `claude-something` (any name starting with `claude-`)
+1. Create a text channel named `afk-something` (any name starting with `afk-`)
 2. Edit the channel topic to a directory path (e.g. `/home/dan/myproject`)
 3. The bot validates the path, spawns `claude --dangerously-skip-permissions` in that directory, and begins relaying messages
 4. Type in the channel to send input to Claude
@@ -133,6 +133,7 @@ npx afk-code <command>
 # Or run from source
 git clone https://github.com/clharman/afk-code.git
 cd afk-code && npm install
+npm run dev -- discord
 npm run dev -- slack
 npm run dev -- claude
 ```
@@ -153,7 +154,7 @@ This starts an HTTP server on `localhost:3000` that simulates Discord events. Al
 # Create a channel
 curl -X POST localhost:3000/create-channel \
   -H 'Content-Type: application/json' \
-  -d '{"name":"claude-test"}'
+  -d '{"name":"afk-test"}'
 
 # Set topic to spawn a Claude session
 curl -X POST localhost:3000/change-topic \
@@ -165,11 +166,21 @@ curl -X POST localhost:3000/send-message \
   -H 'Content-Type: application/json' \
   -d '{"channelId":"mock-chan-1","content":"hello"}'
 
-# Run a slash command (clear, interrupt, background, mode, compact, model opus)
+# Run a slash command (clear, interrupt, background, mode, compact, model opus, archive)
 curl -X POST localhost:3000/command \
   -H 'Content-Type: application/json' \
   -d '{"channelId":"mock-chan-1","command":"clear"}'
 ```
+
+### Automated integration test
+
+Run the full lifecycle test against the mock Discord system:
+
+```bash
+npm run test:mock
+```
+
+This exercises: channel creation, messaging, archive/resume cycles, topic changes, deletion, prefix validation, and orphan recovery (SIGKILL + restart).
 
 ### Testing with mock-discord (for AI agents)
 
@@ -183,7 +194,7 @@ Start the mock server with `npm run build && node dist/cli/index.js discord --mo
 2. `afk-code claude` spawns Claude in a PTY and connects to the bot via Unix socket
 3. The bot watches Claude's JSONL files for messages and relays them to chat
 4. Messages you send in chat are forwarded to the terminal
-5. With auto-spawn (Discord), creating a `claude-*` channel and setting its topic to a directory spawns Claude directly — no terminal needed
+5. With auto-spawn (Discord), creating an `afk-*` channel and setting its topic to a directory spawns Claude directly — no terminal needed
 
 ## Limitations
 

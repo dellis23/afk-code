@@ -10,18 +10,10 @@ import { randomUUID } from 'crypto';
 import { homedir } from 'os';
 import { join, basename } from 'path';
 import { SessionManager } from '../slack/session-manager.js';
-import { loadChannelState, saveChannelState, type ChannelState } from './channel-state.js';
+import { ChannelStore } from './channel-store.js';
 import { chunkMessage, formatSessionStatus, formatTodos } from '../slack/message-formatter.js';
 
 const ALLOWED_MODELS = ['opus', 'sonnet', 'haiku'];
-
-interface MockChannel {
-  id: string;
-  name: string;
-  topic?: string;
-  sessionId?: string;
-  archived?: boolean;
-}
 
 function parseBody(req: import('http').IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -44,15 +36,11 @@ function json(res: import('http').ServerResponse, status: number, data: any) {
 }
 
 export function createMockDiscordApp(port: number) {
-  const channels = new Map<string, MockChannel>();
-  const channelToSession = new Map<string, string>();
-  const sessionToChannel = new Map<string, string>();
-  const persistedChannels = new Map<string, ChannelState>();
-  const respawningChannels = new Set<string>(); // channelIds mid-respawn
+  let store: ChannelStore;
   let channelCounter = 0;
 
   function channelName(channelId: string): string {
-    return channels.get(channelId)?.name || channelId;
+    return store?.get(channelId)?.channelName || channelId;
   }
 
   function log(channelId: string, msg: string) {
@@ -61,71 +49,64 @@ export function createMockDiscordApp(port: number) {
 
   const sessionManager = new SessionManager({
     onSessionStart: async (session) => {
-      const chId = sessionToChannel.get(session.id);
-      if (chId) {
-        log(chId, `🟢 **Session started** \`${session.cwd}\``);
+      const channel = store?.getBySession(session.id);
+      if (channel) {
+        log(channel.channelId, `🟢 **Session started** \`${session.cwd}\``);
       }
     },
 
     onSessionEnd: async (sessionId) => {
-      const chId = sessionToChannel.get(sessionId);
-      if (chId) {
-        const ch = channels.get(chId);
-        if (ch?.archived) return; // archived via /archive — don't log "ended"
-        if (respawningChannels.has(chId)) return; // mid-respawn — don't interfere
-        log(chId, '🛑 **Session ended**');
-      }
+      const channel = store?.getBySession(sessionId);
+      if (!channel) return;
+      if (channel.status !== 'running' && channel.status !== 'idle') return;
+      log(channel.channelId, '🛑 **Session ended**');
     },
 
     onSessionUpdate: async (sessionId, name) => {
-      const chId = sessionToChannel.get(sessionId);
-      if (chId) {
-        log(chId, `📝 Session name: ${name}`);
+      const channel = store?.getBySession(sessionId);
+      if (channel) {
+        log(channel.channelId, `📝 Session name: ${name}`);
       }
     },
 
     onSessionStatus: async (sessionId, status) => {
-      const chId = sessionToChannel.get(sessionId);
-      if (chId) {
-        log(chId, `${formatSessionStatus(status)} Status: ${status}`);
+      const channel = store?.getBySession(sessionId);
+      if (channel) {
+        log(channel.channelId, `${formatSessionStatus(status)} Status: ${status}`);
       }
     },
 
     onMessage: async (sessionId, role, content) => {
-      const chId = sessionToChannel.get(sessionId);
-      if (!chId) return;
+      const channel = store?.getBySession(sessionId);
+      if (!channel) return;
 
       // Persist the Claude session UUID once it's known
       const claudeId = sessionManager.getClaudeSessionId(sessionId);
-      if (claudeId) {
-        const existing = persistedChannels.get(chId);
-        if (existing && existing.claudeSessionId !== claudeId) {
-          existing.claudeSessionId = claudeId;
-          saveChannelState(persistedChannels).catch(err => console.error('[mock-discord] Failed to save state:', err));
-          console.log(`[mock-discord] Persisted Claude session UUID: ${claudeId} for channel ${chId}`);
-        }
+      if (claudeId && channel.claudeSessionId !== claudeId) {
+        store.setClaudeSessionId(channel.channelId, claudeId);
+        console.log(`[mock-discord] Persisted Claude session UUID: ${claudeId} for channel ${channel.channelId}`);
       }
 
       if (role === 'user') {
-        log(chId, `[user] ${content.slice(0, 200)}`);
+        log(channel.channelId, `[user] ${content.slice(0, 200)}`);
       } else {
         const chunks = chunkMessage(content);
         for (const chunk of chunks) {
-          log(chId, `[assistant] ${chunk.slice(0, 200)}`);
+          log(channel.channelId, `[assistant] ${chunk.slice(0, 200)}`);
         }
       }
     },
 
     onTodos: async (sessionId, todos) => {
-      const chId = sessionToChannel.get(sessionId);
-      if (chId && todos.length > 0) {
-        log(chId, `📋 Tasks: ${formatTodos(todos)}`);
+      const channel = store?.getBySession(sessionId);
+      if (channel && todos.length > 0) {
+        log(channel.channelId, `📋 Tasks: ${formatTodos(todos)}`);
       }
     },
 
     onToolCall: async (sessionId, tool) => {
-      const chId = sessionToChannel.get(sessionId);
-      if (!chId) return;
+      const channel = store?.getBySession(sessionId);
+      if (!channel) return;
 
       let inputSummary = '';
       if (tool.name === 'Bash' && tool.input.command) {
@@ -138,24 +119,24 @@ export function createMockDiscordApp(port: number) {
         inputSummary = tool.input.description;
       }
 
-      log(chId, inputSummary ? `🔧 ${tool.name}: ${inputSummary}` : `🔧 ${tool.name}`);
+      log(channel.channelId, inputSummary ? `🔧 ${tool.name}: ${inputSummary}` : `🔧 ${tool.name}`);
     },
 
     onToolResult: async (sessionId, result) => {
-      const chId = sessionToChannel.get(sessionId);
-      if (!chId) return;
+      const channel = store?.getBySession(sessionId);
+      if (!channel) return;
 
       const prefix = result.isError ? '❌ Error' : '✅ Result';
       const content = result.content.length > 200
         ? result.content.slice(0, 200) + '...'
         : result.content;
-      log(chId, `  ${prefix}: ${content}`);
+      log(channel.channelId, `  ${prefix}: ${content}`);
     },
 
     onPlanModeChange: async (sessionId, inPlanMode) => {
-      const chId = sessionToChannel.get(sessionId);
-      if (chId) {
-        log(chId, inPlanMode ? '📋 Plan mode active' : '🔨 Execution mode');
+      const channel = store?.getBySession(sessionId);
+      if (channel) {
+        log(channel.channelId, inPlanMode ? '📋 Plan mode active' : '🔨 Execution mode');
       }
     },
   });
@@ -170,8 +151,8 @@ export function createMockDiscordApp(port: number) {
         if (!name || typeof name !== 'string') {
           return json(res, 400, { error: 'Missing "name" field' });
         }
-        if (!name.startsWith('claude-')) {
-          return json(res, 400, { error: 'Channel name must start with "claude-"' });
+        if (!name.startsWith('afk-')) {
+          return json(res, 400, { error: 'Channel name must start with "afk-"' });
         }
 
         channelCounter++;
@@ -179,24 +160,20 @@ export function createMockDiscordApp(port: number) {
         const home = homedir();
         const sessionId = randomUUID().slice(0, 8);
 
-        channels.set(channelId, { id: channelId, name, topic: home, sessionId });
-        channelToSession.set(channelId, sessionId);
-        sessionToChannel.set(sessionId, channelId);
+        store.register(channelId, name, home);
 
         console.log(`[mock-discord] Channel created: #${name} (${channelId})`);
         console.log(`[mock-discord] Auto-spawning session ${sessionId} in ${home}`);
 
+        // Bind BEFORE spawning so onSessionStart can find the channel
+        store.bindSession(channelId, sessionId);
+
         try {
           await sessionManager.spawnSession(sessionId, home);
-          // Persist state so orphan recovery can find this session
-          persistedChannels.set(channelId, { channelId, channelName: name, cwd: home, claudeSessionId: '', sessionId });
-          saveChannelState(persistedChannels).catch(err => console.error('[mock-discord] Failed to save state:', err));
           return json(res, 200, { channelId, name, sessionId, cwd: home });
         } catch (err: any) {
-          // Clean up on failure
-          channels.get(channelId)!.sessionId = undefined;
-          channelToSession.delete(channelId);
-          sessionToChannel.delete(sessionId);
+          store.unbindSession(channelId);
+          store.transition(channelId, 'ended');
           console.error(`[mock-discord] Failed to spawn session: ${err.message || err}`);
           return json(res, 200, { channelId, name, error: `Failed to auto-spawn: ${err.message || err}` });
         }
@@ -208,7 +185,7 @@ export function createMockDiscordApp(port: number) {
           return json(res, 400, { error: 'Missing "channelId" or "topic"' });
         }
 
-        const channel = channels.get(channelId);
+        const channel = store.get(channelId);
         if (!channel) {
           return json(res, 404, { error: 'Channel not found' });
         }
@@ -227,34 +204,30 @@ export function createMockDiscordApp(port: number) {
         // Kill existing session for this channel if any
         const oldSessionId = channel.sessionId;
         if (oldSessionId) {
-          console.log(`[mock-discord] Killing existing session ${oldSessionId} for #${channel.name}`);
-          sessionToChannel.delete(oldSessionId);
-          channelToSession.delete(channelId);
+          console.log(`[mock-discord] Killing existing session ${oldSessionId} for #${channel.channelName}`);
+          store.unbindSession(channelId);
           sessionManager.killSession(oldSessionId);
-          channel.sessionId = undefined;
-          // Brief pause for cleanup
           await new Promise(r => setTimeout(r, 500));
         }
 
-        const sessionId = randomUUID().slice(0, 8);
-        channel.topic = cwd;
-        channel.sessionId = sessionId;
-        channelToSession.set(channelId, sessionId);
-        sessionToChannel.set(sessionId, channelId);
+        // Remove old entry, register fresh
+        store.remove(channelId);
+        store.register(channelId, channel.channelName, cwd);
 
-        console.log(`[mock-discord] Topic changed on #${channel.name}: ${cwd}`);
+        const sessionId = randomUUID().slice(0, 8);
+
+        console.log(`[mock-discord] Topic changed on #${channel.channelName}: ${cwd}`);
         console.log(`[mock-discord] Spawning session ${sessionId} in ${cwd}`);
+
+        // Bind BEFORE spawning so onSessionStart can find the channel
+        store.bindSession(channelId, sessionId);
 
         try {
           await sessionManager.spawnSession(sessionId, cwd);
-          persistedChannels.set(channelId, { channelId, channelName: channel.name, cwd, claudeSessionId: '', sessionId });
-          saveChannelState(persistedChannels).catch(err => console.error('[mock-discord] Failed to save state:', err));
           return json(res, 200, { sessionId, channelId, cwd, previousSessionId: oldSessionId || null });
         } catch (err: any) {
-          // Clean up on failure
-          channel.sessionId = undefined;
-          channelToSession.delete(channelId);
-          sessionToChannel.delete(sessionId);
+          store.unbindSession(channelId);
+          store.transition(channelId, 'ended');
           return json(res, 500, { error: `Failed to spawn: ${err.message || err}` });
         }
       }
@@ -289,61 +262,48 @@ export function createMockDiscordApp(port: number) {
         }
 
         // Check if channel is archived — re-spawn session
-        const channel = channels.get(channelId);
-        if (channel?.archived) {
-          respawningChannels.add(channelId);
-          const oldSessionId = channelToSession.get(channelId);
-          const saved = persistedChannels.get(channelId);
-          const cwd = channel.topic || saved?.cwd || homedir();
-          const resumeSessionId = saved?.claudeSessionId;
-          const cleanName = channel.name.replace(/-archived$/, '');
+        const channel = store.get(channelId);
+        if (channel?.status === 'archived') {
+          store.transition(channelId, 'resuming');
 
-          // Clean up old mappings
-          if (oldSessionId) {
-            sessionToChannel.delete(oldSessionId);
-            channelToSession.delete(channelId);
-          }
+          const cwd = channel.cwd;
+          const resumeSessionId = channel.claudeSessionId || undefined;
+          const cleanName = channel.channelName.replace(/-archived$/, '');
+
+          // Clean up old session binding
+          store.unbindSession(channelId);
 
           // Spawn new session with --resume
           const newSessionId = randomUUID().slice(0, 8);
-          channel.sessionId = newSessionId;
-          channel.name = cleanName;
-          channel.archived = false;
-          channelToSession.set(channelId, newSessionId);
-          sessionToChannel.set(newSessionId, channelId);
 
-          console.log(`[mock-discord] Re-spawning session ${newSessionId} for archived channel #${channel.name} in ${cwd}`);
+          console.log(`[mock-discord] Re-spawning session ${newSessionId} for archived channel #${channel.channelName} in ${cwd}`);
+
+          // Bind BEFORE spawning so onSessionStart can find the channel
+          store.bindSession(channelId, newSessionId);
+          store.setChannelName(channelId, cleanName);
 
           try {
             await sessionManager.spawnSession(newSessionId, cwd, { resumeSessionId });
+
             await sessionManager.waitForReady(newSessionId);
-            // Extra buffer — Claude's input handler needs a moment after the prompt appears
             await new Promise(r => setTimeout(r, 1000));
 
             // Send the message
             const sent = sessionManager.sendInput(newSessionId, fullContent);
 
-            // Update persisted state
-            persistedChannels.set(channelId, { channelId, channelName: cleanName, cwd, claudeSessionId: resumeSessionId || '', sessionId: newSessionId });
-            saveChannelState(persistedChannels).catch(err => console.error('[mock-discord] Failed to save state:', err));
-
-            respawningChannels.delete(channelId);
             return json(res, 200, { ok: sent, resumed: true, newSessionId, attachments: savedPaths.length > 0 ? savedPaths : undefined });
           } catch (err: any) {
-            channel.sessionId = undefined;
-            channelToSession.delete(channelId);
-            sessionToChannel.delete(newSessionId);
-            respawningChannels.delete(channelId);
+            store.unbindSession(channelId);
+            store.transition(channelId, 'archived'); // revert
             return json(res, 500, { error: `Failed to re-spawn: ${err.message || err}` });
           }
         }
 
-        const sessionId = channelToSession.get(channelId);
-        if (!sessionId) {
+        if (!channel?.sessionId) {
           return json(res, 404, { error: 'No session for this channel' });
         }
 
-        const sent = sessionManager.sendInput(sessionId, fullContent);
+        const sent = sessionManager.sendInput(channel.sessionId, fullContent);
         return json(res, sent ? 200 : 500, { ok: sent, attachments: savedPaths.length > 0 ? savedPaths : undefined });
       }
 
@@ -353,11 +313,12 @@ export function createMockDiscordApp(port: number) {
           return json(res, 400, { error: 'Missing "channelId" or "command"' });
         }
 
-        const sessionId = channelToSession.get(channelId);
-        if (!sessionId) {
+        const channel = store.get(channelId);
+        if (!channel?.sessionId) {
           return json(res, 404, { error: 'No session for this channel' });
         }
 
+        const sessionId = channel.sessionId;
         let sent = false;
         const cmd = command.trim().toLowerCase();
 
@@ -397,17 +358,16 @@ export function createMockDiscordApp(port: number) {
             return json(res, 500, { ok: false, command, error: 'Failed to capture tmux pane' });
           }
         } else if (cmd === 'archive') {
-          const channel = channels.get(channelId);
-          if (channel?.archived) {
+          if (channel.status === 'archived') {
             return json(res, 400, { error: 'Channel is already archived' });
           }
 
-          // Rename channel, mark archived, kill session (keep mappings for re-spawn)
-          if (channel) {
-            channel.name = `${channel.name}-archived`;
-            channel.archived = true;
-          }
-          console.log(`[mock-discord] #${channel?.name} → 📦 Session archived. Send a message to resume.`);
+          const archivedName = `${channel.channelName}-archived`;
+          store.transition(channelId, 'archived');
+          store.setChannelName(channelId, archivedName);
+          store.unbindSession(channelId);
+
+          console.log(`[mock-discord] #${archivedName} → 📦 Session archived. Send a message to resume.`);
           sessionManager.killSession(sessionId);
           return json(res, 200, { ok: true, command, channelId, sessionId, message: 'Session archived. Send a message to resume.' });
         } else {
@@ -423,36 +383,33 @@ export function createMockDiscordApp(port: number) {
           return json(res, 400, { error: 'Missing "channelId"' });
         }
 
-        const channel = channels.get(channelId);
+        const channel = store.get(channelId);
         if (!channel) {
           return json(res, 404, { error: 'Channel not found' });
         }
 
-        // Kill session if one exists (unregister mappings first, then kill)
         const sessionId = channel.sessionId;
         if (sessionId) {
-          console.log(`[mock-discord] Deleting channel #${channel.name}, killing session ${sessionId}`);
-          sessionToChannel.delete(sessionId);
-          channelToSession.delete(channelId);
+          console.log(`[mock-discord] Deleting channel #${channel.channelName}, killing session ${sessionId}`);
+          store.remove(channelId);
           sessionManager.killSession(sessionId);
-          // Brief pause for cleanup
           await new Promise(r => setTimeout(r, 500));
+        } else {
+          store.remove(channelId);
         }
 
-        channels.delete(channelId);
-        persistedChannels.delete(channelId);
-        saveChannelState(persistedChannels).catch(err => console.error('[mock-discord] Failed to save state:', err));
-        console.log(`[mock-discord] Channel deleted: #${channel.name} (${channelId})`);
+        console.log(`[mock-discord] Channel deleted: #${channel.channelName} (${channelId})`);
         return json(res, 200, { ok: true, channelId, killedSessionId: sessionId || null });
       }
 
       if (req.method === 'GET' && url === '/sessions') {
         const sessions = sessionManager.getAllSessions();
-        const channelList = Array.from(channels.values()).map(ch => ({
-          channelId: ch.id,
-          name: ch.name,
-          topic: ch.topic,
+        const channelList = store.getAllActive().map(ch => ({
+          channelId: ch.channelId,
+          name: ch.channelName,
+          cwd: ch.cwd,
           sessionId: ch.sessionId,
+          status: ch.status,
         }));
         return json(res, 200, { sessions, channels: channelList });
       }
@@ -460,7 +417,7 @@ export function createMockDiscordApp(port: number) {
       // Default: show available endpoints
       return json(res, 200, {
         endpoints: {
-          'POST /create-channel': { body: '{ "name": "claude-test" }' },
+          'POST /create-channel': { body: '{ "name": "afk-test" }' },
           'POST /change-topic': { body: '{ "channelId": "...", "topic": "/path/to/dir" }' },
           'POST /delete-channel': { body: '{ "channelId": "..." }' },
           'POST /send-message': { body: '{ "channelId": "...", "content": "hello" }' },
@@ -479,11 +436,8 @@ export function createMockDiscordApp(port: number) {
     async start() {
       await sessionManager.start();
 
-      // Orphan recovery: re-attach to surviving tmux sessions from a previous crash
-      const savedState = await loadChannelState();
-      for (const [id, state] of savedState) {
-        persistedChannels.set(id, state);
-      }
+      // Load persisted state for orphan recovery
+      store = await ChannelStore.load();
 
       // Discover running afk-* tmux sessions
       const runningTmuxSessions = new Set<string>();
@@ -504,25 +458,19 @@ export function createMockDiscordApp(port: number) {
 
       // Try to re-attach to tmux sessions that match persisted state
       const claimedSessions = new Set<string>();
-      for (const [channelId, state] of persistedChannels) {
-        if (state.sessionId && runningTmuxSessions.has(state.sessionId)) {
-          console.log(`[mock-discord] Re-attaching to tmux session afk-${state.sessionId} for channel ${channelId}`);
-          claimedSessions.add(state.sessionId);
+      for (const ch of store.getAll()) {
+        if (ch.sessionId && runningTmuxSessions.has(ch.sessionId)) {
+          console.log(`[mock-discord] Re-attaching to tmux session afk-${ch.sessionId} for channel ${ch.channelId}`);
+          claimedSessions.add(ch.sessionId);
 
           channelCounter++;
-          const cwd = state.cwd || homedir();
-          channels.set(channelId, { id: channelId, name: state.channelName, topic: cwd, sessionId: state.sessionId });
-          channelToSession.set(channelId, state.sessionId);
-          sessionToChannel.set(state.sessionId, channelId);
-
           try {
-            await sessionManager.attachSession(state.sessionId, cwd);
-            console.log(`[mock-discord] Successfully re-attached to afk-${state.sessionId}`);
+            await sessionManager.attachSession(ch.sessionId, ch.cwd);
+            store.bindSession(ch.channelId, ch.sessionId);
+            console.log(`[mock-discord] Successfully re-attached to afk-${ch.sessionId}`);
           } catch (err) {
-            console.error(`[mock-discord] Failed to attach to afk-${state.sessionId}:`, err);
-            channels.delete(channelId);
-            channelToSession.delete(channelId);
-            sessionToChannel.delete(state.sessionId);
+            console.error(`[mock-discord] Failed to attach to afk-${ch.sessionId}:`, err);
+            store.transition(ch.channelId, 'ended');
           }
         }
       }

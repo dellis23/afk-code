@@ -4,29 +4,28 @@ import { stat } from 'fs/promises';
 import { homedir, tmpdir } from 'os';
 
 describe('Auto-Spawn - Channel Name Detection', () => {
-  it('detects channels with claude- prefix', () => {
-    const name = 'claude-myproject';
-    expect(name.startsWith('claude-')).toBe(true);
+  it('detects channels with afk- prefix', () => {
+    const name = 'afk-myproject';
+    expect(name.startsWith('afk-')).toBe(true);
   });
 
-  it('ignores channels without claude- prefix', () => {
+  it('ignores channels without afk- prefix', () => {
     const name = 'general';
-    expect(name.startsWith('claude-')).toBe(false);
+    expect(name.startsWith('afk-')).toBe(false);
   });
 
-  it('ignores channels with claude prefix but no hyphen', () => {
-    const name = 'claudeproject';
-    expect(name.startsWith('claude-')).toBe(false);
+  it('ignores channels with afk prefix but no hyphen', () => {
+    const name = 'afkproject';
+    expect(name.startsWith('afk-')).toBe(false);
   });
 
-  it('detects various claude- channel names', () => {
-    expect('claude-test'.startsWith('claude-')).toBe(true);
-    expect('claude-my-project'.startsWith('claude-')).toBe(true);
-    expect('claude-123'.startsWith('claude-')).toBe(true);
+  it('detects various afk- channel names', () => {
+    expect('afk-test'.startsWith('afk-')).toBe(true);
+    expect('afk-my-project'.startsWith('afk-')).toBe(true);
+    expect('afk-123'.startsWith('afk-')).toBe(true);
   });
 
   it('only triggers for GuildText channels', () => {
-    // Non-text channel types should be ignored
     const textType = ChannelType.GuildText;
     const voiceType = ChannelType.GuildVoice;
     const categoryType = ChannelType.GuildCategory;
@@ -45,12 +44,12 @@ describe('Auto-Spawn - Immediate Spawn on Channel Create', () => {
   });
 
   it('spawns immediately without waiting for topic', () => {
-    // When a claude-* channel is created, we should spawn right away
+    // When an afk-* channel is created, we should spawn right away
     // in $HOME, not wait for a topic to be set.
-    const channelName = 'claude-myproject';
+    const channelName = 'afk-myproject';
     const home = homedir();
 
-    expect(channelName.startsWith('claude-')).toBe(true);
+    expect(channelName.startsWith('afk-')).toBe(true);
     expect(home.length).toBeGreaterThan(0);
     expect(home.startsWith('/')).toBe(true);
   });
@@ -61,33 +60,23 @@ describe('Auto-Spawn - JSONL Claiming Race Prevention', () => {
     const claimedFiles = new Set<string>();
     const path = '/home/user/.claude/projects/-home-user/abc123.jsonl';
 
-    // First session claims the file
     expect(claimedFiles.has(path)).toBe(false);
     claimedFiles.add(path);
 
-    // Second session should see it's already claimed
     expect(claimedFiles.has(path)).toBe(true);
   });
 
   it('re-checks claimedFiles after async operations', () => {
-    // Simulates the fix: after awaiting hasConversationMessages(),
-    // we re-check claimedFiles before returning. This prevents the
-    // race where two sessions both find the same file unclaimed,
-    // then both await I/O, then both try to claim it.
     const claimedFiles = new Set<string>();
     const path = '/home/user/.claude/projects/-home-user/abc123.jsonl';
 
-    // Session A checks — not claimed
     const checkA = !claimedFiles.has(path);
     expect(checkA).toBe(true);
 
-    // Session B claims it (simulates B finishing its async work first)
     claimedFiles.add(path);
 
-    // Session A re-checks — now it's claimed
     const recheckA = !claimedFiles.has(path);
     expect(recheckA).toBe(false);
-    // Session A should skip this file and continue looking
   });
 });
 
@@ -104,7 +93,6 @@ describe('Auto-Spawn - Path Validation', () => {
   });
 
   it('rejects files (not directories)', async () => {
-    // /etc/hostname is a file, not a directory
     try {
       const stats = await stat('/etc/hostname');
       expect(stats.isDirectory()).toBe(false);
@@ -126,7 +114,6 @@ describe('Auto-Spawn - Path Validation', () => {
   });
 
   it('only handles absolute paths (starting with /)', () => {
-    // Non-path topics like session descriptions should be ignored
     expect('/home/user/project'.startsWith('/')).toBe(true);
     expect('/tmp'.startsWith('/')).toBe(true);
     expect('Claude Code session: my-project'.startsWith('/')).toBe(false);
@@ -137,17 +124,14 @@ describe('Auto-Spawn - Path Validation', () => {
 
 describe('Auto-Spawn - Topic Change Respawn', () => {
   it('kills old session and spawns new one on topic change', () => {
-    // Simulate channel-to-session mapping
     const channelToSession = new Map<string, string>();
     const channelId = 'chan-123';
     const oldSessionId = 'sess-old';
     const newSessionId = 'sess-new';
 
-    // Initial session
     channelToSession.set(channelId, oldSessionId);
     expect(channelToSession.get(channelId)).toBe(oldSessionId);
 
-    // Topic change: unregister old, register new
     channelToSession.delete(channelId);
     channelToSession.set(channelId, newSessionId);
     expect(channelToSession.get(channelId)).toBe(newSessionId);
@@ -157,11 +141,9 @@ describe('Auto-Spawn - Topic Change Respawn', () => {
     const channelToSession = new Map<string, string>();
     const channelId = 'chan-456';
 
-    // No existing session — should just spawn new
     const existing = channelToSession.get(channelId);
     expect(existing).toBeUndefined();
 
-    // Set new session
     channelToSession.set(channelId, 'sess-new');
     expect(channelToSession.get(channelId)).toBe('sess-new');
   });
@@ -170,16 +152,13 @@ describe('Auto-Spawn - Topic Change Respawn', () => {
     const channelToSession = new Map<string, string>();
     const channelId = 'chan-789';
 
-    // First topic change
     channelToSession.set(channelId, 'sess-1');
     expect(channelToSession.get(channelId)).toBe('sess-1');
 
-    // Second topic change
     channelToSession.delete(channelId);
     channelToSession.set(channelId, 'sess-2');
     expect(channelToSession.get(channelId)).toBe('sess-2');
 
-    // Third topic change
     channelToSession.delete(channelId);
     channelToSession.set(channelId, 'sess-3');
     expect(channelToSession.get(channelId)).toBe('sess-3');
@@ -187,20 +166,19 @@ describe('Auto-Spawn - Topic Change Respawn', () => {
 });
 
 describe('Auto-Spawn - Concurrent Spawn Guard', () => {
-  it('prevents double-fire from rapid events', () => {
-    const spawningChannels = new Set<string>();
+  it('ChannelStore status prevents double-spawn', () => {
+    // With ChannelStore, the spawning guard is replaced by status checks.
+    // If a channel is already in 'spawning' or 'running', duplicate
+    // ChannelCreate events are ignored via store.get(channel.id) check.
+    const tracked = new Map<string, string>();
     const channelId = 'chan-guard';
 
-    // First attempt should proceed
-    expect(spawningChannels.has(channelId)).toBe(false);
-    spawningChannels.add(channelId);
+    // First event: not tracked → proceed
+    expect(tracked.has(channelId)).toBe(false);
+    tracked.set(channelId, 'spawning');
 
-    // Second attempt should be blocked
-    expect(spawningChannels.has(channelId)).toBe(true);
-
-    // After spawn completes, guard is removed
-    spawningChannels.delete(channelId);
-    expect(spawningChannels.has(channelId)).toBe(false);
+    // Second event: already tracked → skip
+    expect(tracked.has(channelId)).toBe(true);
   });
 });
 
@@ -212,7 +190,6 @@ describe('Auto-Spawn - Channel Lifecycle', () => {
 
     channelToSession.set(channelId, sessionId);
 
-    // Simulate channel delete
     const foundSessionId = channelToSession.get(channelId);
     expect(foundSessionId).toBe(sessionId);
 
@@ -228,35 +205,30 @@ describe('Auto-Spawn - Channel Lifecycle', () => {
     expect(foundSessionId).toBeUndefined();
   });
 
-  it('restores sessions for existing claude-* channels on restart', () => {
-    // On bot restart, scan guild for claude-* text channels and restore sessions.
-    // Use topic as cwd if it's a valid absolute path, otherwise fall back to $HOME.
+  it('restores sessions for existing afk-* channels on restart', () => {
+    // On bot restart, scan guild for afk-* text channels and restore sessions.
     const existingChannels = [
-      { id: 'chan-1', name: 'claude-project', type: 'GuildText', topic: '/home/user/project' },
-      { id: 'chan-2', name: 'claude-test', type: 'GuildText', topic: '' },
-      { id: 'chan-3', name: 'claude-other', type: 'GuildText', topic: 'Some description' },
+      { id: 'chan-1', name: 'afk-project', type: 'GuildText', topic: '/home/user/project' },
+      { id: 'chan-2', name: 'afk-test', type: 'GuildText', topic: '' },
+      { id: 'chan-3', name: 'afk-other', type: 'GuildText', topic: 'Some description' },
       { id: 'chan-4', name: 'general', type: 'GuildText', topic: '' },
-      { id: 'chan-5', name: 'claude-voice', type: 'GuildVoice', topic: '' },
+      { id: 'chan-5', name: 'afk-voice', type: 'GuildVoice', topic: '' },
     ];
 
     const home = '/home/user';
     const restoredSessions: { channelId: string; cwd: string }[] = [];
 
     for (const ch of existingChannels) {
-      // Only text channels
       if (ch.type !== 'GuildText') continue;
-      // Only claude-* prefix
-      if (!ch.name.startsWith('claude-')) continue;
+      if (!ch.name.startsWith('afk-')) continue;
 
-      // Determine cwd: topic if absolute path, else $HOME
       const topic = ch.topic?.trim();
       const cwd = (topic && topic.startsWith('/')) ? topic : home;
 
       restoredSessions.push({ channelId: ch.id, cwd });
     }
 
-    // Should restore chan-1 (topic=/home/user/project), chan-2 ($HOME), chan-3 ($HOME)
-    // Should skip chan-4 (no claude- prefix) and chan-5 (not text channel)
+    // Should restore chan-1, chan-2, chan-3 — skip chan-4 (no prefix), chan-5 (voice)
     expect(restoredSessions).toHaveLength(3);
     expect(restoredSessions[0]).toEqual({ channelId: 'chan-1', cwd: '/home/user/project' });
     expect(restoredSessions[1]).toEqual({ channelId: 'chan-2', cwd: home });
@@ -264,16 +236,14 @@ describe('Auto-Spawn - Channel Lifecycle', () => {
   });
 
   it('uses --resume with saved Claude session UUID on restore', () => {
-    // Persisted state maps channel ID → Claude session UUID (from JSONL filename).
-    // On restore, we use --resume <uuid> to continue the exact conversation.
     const savedState = new Map<string, { claudeSessionId: string; cwd: string }>();
     savedState.set('chan-1', { claudeSessionId: '16eb1b09-36ac-4761-9a97-5e02265e661b', cwd: '/home/user/project' });
     savedState.set('chan-2', { claudeSessionId: 'abcdef01-2345-6789-abcd-ef0123456789', cwd: '/home/user' });
 
     const channels = [
-      { id: 'chan-1', name: 'claude-project', type: 'GuildText', topic: '/home/user/project' },
-      { id: 'chan-2', name: 'claude-test', type: 'GuildText', topic: '' },
-      { id: 'chan-3', name: 'claude-new', type: 'GuildText', topic: '' }, // no saved state
+      { id: 'chan-1', name: 'afk-project', type: 'GuildText', topic: '/home/user/project' },
+      { id: 'chan-2', name: 'afk-test', type: 'GuildText', topic: '' },
+      { id: 'chan-3', name: 'afk-new', type: 'GuildText', topic: '' },
     ];
 
     const home = '/home/user';
@@ -281,7 +251,7 @@ describe('Auto-Spawn - Channel Lifecycle', () => {
 
     for (const ch of channels) {
       if (ch.type !== 'GuildText') continue;
-      if (!ch.name.startsWith('claude-')) continue;
+      if (!ch.name.startsWith('afk-')) continue;
 
       const saved = savedState.get(ch.id);
       const topic = ch.topic?.trim();
@@ -294,15 +264,12 @@ describe('Auto-Spawn - Channel Lifecycle', () => {
       });
     }
 
-    // chan-1: has saved state, should --resume with exact UUID
     expect(spawnCommands[0].resumeSessionId).toBe('16eb1b09-36ac-4761-9a97-5e02265e661b');
     expect(spawnCommands[0].cwd).toBe('/home/user/project');
 
-    // chan-2: has saved state, should --resume with exact UUID, cwd from saved state
     expect(spawnCommands[1].resumeSessionId).toBe('abcdef01-2345-6789-abcd-ef0123456789');
     expect(spawnCommands[1].cwd).toBe('/home/user');
 
-    // chan-3: no saved state, should start fresh (no resumeSessionId)
     expect(spawnCommands[2].resumeSessionId).toBeUndefined();
     expect(spawnCommands[2].cwd).toBe(home);
   });
@@ -318,24 +285,17 @@ describe('Auto-Spawn - Channel Lifecycle', () => {
     const persistedChannels = new Map<string, { claudeSessionId: string }>();
     const channelId = 'chan-1';
 
-    // Initially persisted
     persistedChannels.set(channelId, { claudeSessionId: 'old-uuid' });
 
-    // After /clear, new JSONL → new UUID
     const newClaudeId = 'new-uuid';
     const existing = persistedChannels.get(channelId);
     expect(existing?.claudeSessionId).not.toBe(newClaudeId);
 
-    // Should update
     persistedChannels.set(channelId, { claudeSessionId: newClaudeId });
     expect(persistedChannels.get(channelId)?.claudeSessionId).toBe(newClaudeId);
   });
 
-  it('unregisters channel before killing session on delete to prevent stale fetch', () => {
-    // This tests the fix for DiscordAPIError[10003]: Unknown Channel.
-    // When a channel is deleted, we must unregister the channel mapping
-    // BEFORE killing the session. Otherwise, onSessionEnd fires and tries
-    // to fetch/message the already-deleted channel, causing an error.
+  it('removes channel before killing session on delete to prevent stale fetch', () => {
     const channels = new Map<string, { sessionId: string; channelId: string }>();
     const channelToSession = new Map<string, string>();
     const channelId = 'chan-to-delete';
@@ -344,12 +304,11 @@ describe('Auto-Spawn - Channel Lifecycle', () => {
     channels.set(sessionId, { sessionId, channelId });
     channelToSession.set(channelId, sessionId);
 
-    // Step 1: Unregister channel mapping (must happen first)
+    // Step 1: Unregister channel mapping first
     channels.delete(sessionId);
     channelToSession.delete(channelId);
 
-    // Step 2: Now when session kill triggers onSessionEnd,
-    // getChannel(sessionId) returns undefined → no Discord API calls
+    // Step 2: Now onSessionEnd can't find channel → no stale API calls
     expect(channels.get(sessionId)).toBeUndefined();
     expect(channelToSession.get(channelId)).toBeUndefined();
   });

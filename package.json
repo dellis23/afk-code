@@ -15,6 +15,7 @@
     "build": "tsup",
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
+    "test:mock": "scripts/test-mock-discord.sh",
     "prepublishOnly": "npm run build",
     "postinstall": "node -e \"const fs = require('fs'); const path = require('path'); const dir = path.dirname(path.dirname(require.resolve('node-pty'))); const prebuilds = path.join(dir, 'prebuilds'); if (fs.existsSync(prebuilds)) { fs.readdirSync(prebuilds).forEach(p => { const helper = path.join(prebuilds, p, 'spawn-helper'); if (fs.existsSync(helper)) fs.chmodSync(helper, 0o755); }); }\""
   },

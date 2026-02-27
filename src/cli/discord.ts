@@ -129,7 +129,7 @@ export async function discordRun(): Promise<void> {
     await app.start();
     console.log(`[AFK Code] Mock Discord mode — HTTP server on http://localhost:${port}`);
     console.log('[AFK Code] Endpoints:');
-    console.log('  POST /create-channel  { "name": "claude-test" }');
+    console.log('  POST /create-channel  { "name": "afk-test" }');
     console.log('  POST /change-topic    { "channelId": "...", "topic": "/path/to/dir" }');
     console.log('  POST /delete-channel  { "channelId": "..." }');
     console.log('  POST /send-message    { "channelId": "...", "content": "hello" }');
