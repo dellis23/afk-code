@@ -787,7 +787,7 @@ export function createDiscordApp(config: DiscordConfig) {
         return;
       }
 
-      sessionManager.resetWatchedFile(channel.sessionId);
+      await sessionManager.resetWatchedFile(channel.sessionId);
       const sent = sessionManager.sendInput(channel.sessionId, '/clear\n');
       if (sent) {
         await interaction.reply('🧹 Conversation cleared');

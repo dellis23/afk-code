@@ -311,7 +311,7 @@ export class SessionManager {
    * Reset the watched JSONL file for a session, so the watcher picks up
    * the next new file. Used after /clear which starts a new conversation.
    */
-  resetWatchedFile(sessionId: string): void {
+  async resetWatchedFile(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
@@ -322,6 +322,13 @@ export class SessionManager {
       session.watchedFile = undefined;
       session.seenMessages.clear();
       session.slugFound = false;
+
+      // Re-snapshot all existing JSONL files so findActiveJsonlFile treats
+      // them as "old" and only picks up truly new files created after /clear.
+      // Without this, it can claim an unrelated session's JSONL from the same
+      // project directory and replay its entire history.
+      session.initialFileStats = await this.snapshotJsonlFiles(session.projectDir);
+
       console.log(`[SessionManager] Reset watched file for session ${sessionId}`);
     }
   }

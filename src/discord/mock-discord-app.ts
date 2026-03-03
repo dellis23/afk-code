@@ -323,7 +323,7 @@ export function createMockDiscordApp(port: number) {
         const cmd = command.trim().toLowerCase();
 
         if (cmd === 'clear') {
-          sessionManager.resetWatchedFile(sessionId);
+          await sessionManager.resetWatchedFile(sessionId);
           sent = sessionManager.sendInput(sessionId, '/clear\n');
         } else if (cmd === 'interrupt') {
           sent = sessionManager.sendInput(sessionId, '\x1b', true);
