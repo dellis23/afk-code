@@ -120,6 +120,8 @@ export function createDiscordApp(config: DiscordConfig) {
 
   // Track messages sent from Discord to avoid re-posting
   const discordSentMessages = new Set<string>();
+  // Channels being checked for early exit — suppress onSessionEnd archiving
+  const suppressArchive = new Set<string>();
 
   // Track tool call messages for threading results
   const toolCallMessages = new Map<string, string>(); // toolUseId -> message id
@@ -159,13 +161,29 @@ export function createDiscordApp(config: DiscordConfig) {
 
     try {
       await sessionManager.spawnSession(sessionId, cwd, { resumeSessionId: options?.resumeSessionId });
+
+      // When resuming, check if Claude exited immediately (bad session ID).
+      // This avoids silently failing — the caller can retry without --resume.
+      if (options?.resumeSessionId) {
+        suppressArchive.add(channelId);
+        const alive = await sessionManager.checkAlive(sessionId);
+        suppressArchive.delete(channelId);
+        if (!alive) {
+          console.log(`[Discord] Session ${sessionId} for #${channelName} exited immediately (likely bad --resume)`);
+          store.unbindSession(channelId);
+          return undefined;
+        }
+      }
+
       return sessionId;
     } catch (err: any) {
       console.error(`[Discord] Failed to spawn session for #${channelName}:`, err);
       store.unbindSession(channelId);
-      const discordChannel = await client.channels.fetch(channelId);
-      if (discordChannel?.type === ChannelType.GuildText) {
-        await discordChannel.send(`\u274c Failed to spawn Claude session: ${err.message || err}`);
+      if (!options?.silent) {
+        const discordChannel = await client.channels.fetch(channelId);
+        if (discordChannel?.type === ChannelType.GuildText) {
+          await discordChannel.send(`\u274c Failed to spawn Claude session: ${err.message || err}`);
+        }
       }
       return undefined;
     }
@@ -208,6 +226,14 @@ export function createDiscordApp(config: DiscordConfig) {
       const channel = store?.getBySession(sessionId);
       if (!channel) return;
       if (channel.status !== 'running' && channel.status !== 'idle') return;
+
+      // If this channel is being checked for early exit (resume failure),
+      // just clean up state silently — the caller will handle retry
+      if (suppressArchive.has(channel.channelId)) {
+        store.transition(channel.channelId, 'ended');
+        store.unbindSession(channel.channelId);
+        return;
+      }
 
       store.transition(channel.channelId, 'ended');
       store.unbindSession(channel.channelId);
@@ -471,7 +497,13 @@ export function createDiscordApp(config: DiscordConfig) {
       const cleanChannelName = channel.channelName.replace(/-archived$/, '');
       store.unbindSession(message.channelId);
 
-      const newSessionId = await handleAutoSpawn(message.channelId, channel.cwd, { resumeSessionId: channel.claudeSessionId || undefined });
+      let newSessionId = await handleAutoSpawn(message.channelId, channel.cwd, { resumeSessionId: channel.claudeSessionId || undefined });
+
+      // If resume failed (e.g. session no longer exists), retry without --resume
+      if (!newSessionId && channel.claudeSessionId) {
+        console.log(`[Discord] Resume failed for #${channel.channelName}, retrying with fresh session`);
+        newSessionId = await handleAutoSpawn(message.channelId, channel.cwd);
+      }
 
       if (newSessionId) {
         // Rename Discord channel back to active
@@ -642,7 +674,11 @@ export function createDiscordApp(config: DiscordConfig) {
             const resumeSessionId = saved?.claudeSessionId;
             console.log(`[Discord] Falling back to spawn for #${ch.name} in ${cwd}`);
             if (!store.get(ch.id)) store.register(ch.id, ch.name, cwd);
-            const newSessionId = await handleAutoSpawn(ch.id, cwd, { silent: true, resumeSessionId: resumeSessionId || undefined });
+            let newSessionId = await handleAutoSpawn(ch.id, cwd, { silent: true, resumeSessionId: resumeSessionId || undefined });
+            if (!newSessionId && resumeSessionId) {
+              console.log(`[Discord] Resume failed for #${ch.name}, retrying with fresh session`);
+              newSessionId = await handleAutoSpawn(ch.id, cwd, { silent: true });
+            }
             if (newSessionId) {
               try {
                 await (ch as TextChannel).send(`🔄 **Session restored** — bot restarted, conversation resumed in \`${cwd}\``);
@@ -659,8 +695,8 @@ export function createDiscordApp(config: DiscordConfig) {
         // No live tmux — spawn fresh
         if (!saved) store.register(ch.id, ch.name, cwd);
         else if (saved.status === 'ended') {
-          // Reset status so we can spawn
-          // ended channels shouldn't re-spawn, but if the Discord channel still exists, try
+          // Reset status so we can re-spawn on restart
+          store.transition(ch.id, 'spawning');
         }
         const resumeSessionId = saved?.claudeSessionId;
 
@@ -670,7 +706,14 @@ export function createDiscordApp(config: DiscordConfig) {
           console.log(`[Discord] Restoring session for #${ch.name} in ${cwd} (fresh — no saved session)`);
         }
 
-        const newSessionId = await handleAutoSpawn(ch.id, cwd, { silent: true, resumeSessionId: resumeSessionId || undefined });
+        let newSessionId = await handleAutoSpawn(ch.id, cwd, { silent: true, resumeSessionId: resumeSessionId || undefined });
+
+        // If resume failed (e.g. session no longer exists), retry without --resume
+        if (!newSessionId && resumeSessionId) {
+          console.log(`[Discord] Resume failed for #${ch.name}, retrying with fresh session`);
+          newSessionId = await handleAutoSpawn(ch.id, cwd, { silent: true });
+        }
+
         if (newSessionId) {
           const msg = resumeSessionId
             ? `🔄 **Session restored** — bot restarted, conversation resumed in \`${cwd}\``

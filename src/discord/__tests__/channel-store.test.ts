@@ -83,6 +83,10 @@ describe('ChannelStore — state transitions', () => {
     store.transition('chan-1', 'ended');
     expect(store.transition('chan-1', 'running')).toBe(false);
     expect(store.get('chan-1')?.status).toBe('ended');
+
+    // ended → spawning is allowed (restart recovery)
+    expect(store.transition('chan-1', 'spawning')).toBe(true);
+    expect(store.get('chan-1')?.status).toBe('spawning');
   });
 
   it('spawning → archived is valid (for restore path)', () => {

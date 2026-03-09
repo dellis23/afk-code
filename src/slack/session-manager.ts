@@ -239,6 +239,16 @@ export class SessionManager {
   }
 
   /**
+   * Wait briefly and check if the session is still alive.
+   * Returns true if alive, false if the process exited within the grace period.
+   * Used to detect --resume failures where Claude exits immediately.
+   */
+  async checkAlive(sessionId: string, graceMs = 2000): Promise<boolean> {
+    await new Promise(resolve => setTimeout(resolve, graceMs));
+    return this.sessions.has(sessionId);
+  }
+
+  /**
    * Attach to an existing tmux session instead of spawning a new one.
    * Used for orphan recovery on restart — re-uses a live tmux session
    * so we don't spawn a duplicate Claude process.

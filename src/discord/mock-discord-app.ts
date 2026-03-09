@@ -274,7 +274,7 @@ export function createMockDiscordApp(port: number) {
           store.unbindSession(channelId);
 
           // Spawn new session with --resume
-          const newSessionId = randomUUID().slice(0, 8);
+          let newSessionId = randomUUID().slice(0, 8);
 
           console.log(`[mock-discord] Re-spawning session ${newSessionId} for archived channel #${channel.channelName} in ${cwd}`);
 
@@ -284,6 +284,18 @@ export function createMockDiscordApp(port: number) {
 
           try {
             await sessionManager.spawnSession(newSessionId, cwd, { resumeSessionId });
+
+            // Check if Claude exited immediately (bad --resume)
+            if (resumeSessionId) {
+              const alive = await sessionManager.checkAlive(newSessionId);
+              if (!alive) {
+                console.log(`[mock-discord] Resume failed for #${channel.channelName}, retrying with fresh session`);
+                const retryId = randomUUID().slice(0, 8);
+                store.bindSession(channelId, retryId);
+                await sessionManager.spawnSession(retryId, cwd);
+                newSessionId = retryId;
+              }
+            }
 
             await sessionManager.waitForReady(newSessionId);
             await new Promise(r => setTimeout(r, 1000));
