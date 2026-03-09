@@ -414,13 +414,45 @@ export function createMockDiscordApp(port: number) {
         return json(res, 200, { ok: true, channelId, killedSessionId: sessionId || null });
       }
 
-      if (req.method === 'GET' && url === '/sessions') {
+      // Test-only: manipulate channel state for testing edge cases
+      if (req.method === 'POST' && url === '/set-channel-state') {
+        const { channelId, claudeSessionId, status } = body;
+        if (!channelId) {
+          return json(res, 400, { error: 'Missing "channelId"' });
+        }
+
+        const channel = store.get(channelId);
+        if (!channel) {
+          return json(res, 404, { error: 'Channel not found' });
+        }
+
+        if (claudeSessionId !== undefined) {
+          store.setClaudeSessionId(channelId, claudeSessionId);
+        }
+        if (status) {
+          // Force status directly (bypasses transition validation — test only)
+          store.forceStatus(channelId, status);
+        }
+
+        const updated = store.get(channelId);
+        return json(res, 200, {
+          ok: true,
+          channelId,
+          status: updated?.status,
+          claudeSessionId: updated?.claudeSessionId,
+        });
+      }
+
+      if (req.method === 'GET' && (url === '/sessions' || url === '/sessions?all=true')) {
         const sessions = sessionManager.getAllSessions();
-        const channelList = store.getAllActive().map(ch => ({
+        const includeAll = url.includes('all=true');
+        const channelSource = includeAll ? store.getAll() : store.getAllActive();
+        const channelList = channelSource.map(ch => ({
           channelId: ch.channelId,
           name: ch.channelName,
           cwd: ch.cwd,
           sessionId: ch.sessionId,
+          claudeSessionId: ch.claudeSessionId,
           status: ch.status,
         }));
         return json(res, 200, { sessions, channels: channelList });
@@ -482,6 +514,39 @@ export function createMockDiscordApp(port: number) {
             console.log(`[mock-discord] Successfully re-attached to afk-${ch.sessionId}`);
           } catch (err) {
             console.error(`[mock-discord] Failed to attach to afk-${ch.sessionId}:`, err);
+            store.transition(ch.channelId, 'ended');
+          }
+          continue;
+        }
+
+        // Ended channels with no live tmux — try to restore by spawning fresh
+        if (ch.status === 'ended') {
+          console.log(`[mock-discord] Restoring ended channel #${ch.channelName} in ${ch.cwd}`);
+          store.transition(ch.channelId, 'spawning');
+
+          channelCounter++;
+          const sessionId = randomUUID().slice(0, 8);
+          const resumeSessionId = ch.claudeSessionId || undefined;
+
+          store.bindSession(ch.channelId, sessionId);
+
+          try {
+            await sessionManager.spawnSession(sessionId, ch.cwd, { resumeSessionId });
+
+            // Check for early exit (bad --resume)
+            if (resumeSessionId) {
+              const alive = await sessionManager.checkAlive(sessionId);
+              if (!alive) {
+                console.log(`[mock-discord] Resume failed for #${ch.channelName}, retrying with fresh session`);
+                const retryId = randomUUID().slice(0, 8);
+                store.bindSession(ch.channelId, retryId);
+                await sessionManager.spawnSession(retryId, ch.cwd);
+              }
+            }
+
+            console.log(`[mock-discord] Restored #${ch.channelName}`);
+          } catch (err) {
+            console.error(`[mock-discord] Failed to restore #${ch.channelName}:`, err);
             store.transition(ch.channelId, 'ended');
           }
         }

@@ -197,6 +197,14 @@ export class ChannelStore {
     return true;
   }
 
+  /** Force status without transition validation — test only */
+  forceStatus(channelId: string, status: ChannelStatus): void {
+    const channel = this.channels.get(channelId);
+    if (!channel) return;
+    channel.status = status;
+    this.schedulePersist();
+  }
+
   /** Updates claudeSessionId (UUID from JSONL), persists */
   setClaudeSessionId(channelId: string, id: string): void {
     const channel = this.channels.get(channelId);

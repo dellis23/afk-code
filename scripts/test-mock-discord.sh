@@ -276,6 +276,115 @@ fi
 echo ""
 
 # ═══════════════════════════════════════
+# Test 11: Resume with bad session ID
+# ═══════════════════════════════════════
+echo -e "${YELLOW}Test 11: Resume with bad session ID (retry without --resume)${NC}"
+
+# Create a channel and wait for it to stabilize
+RESP=$(post /create-channel '{"name":"afk-badresume"}')
+BAD_CHAN=$(jq_val "$RESP" "['channelId']")
+BAD_SESS=$(jq_val "$RESP" "['sessionId']")
+assert_contains "channel created" "mock-chan" "$BAD_CHAN"
+sleep 3
+
+# Archive the channel
+RESP=$(post /command "{\"channelId\":\"$BAD_CHAN\",\"command\":\"archive\"}")
+assert_contains "archived" "archived" "$RESP"
+
+# Corrupt the claudeSessionId to a nonexistent UUID
+RESP=$(post /set-channel-state "{\"channelId\":\"$BAD_CHAN\",\"claudeSessionId\":\"00000000-0000-0000-0000-000000000000\"}")
+assert_eq "state updated" "archived" "$(jq_val "$RESP" "['status']")"
+
+# Send a message — triggers resume with bad --resume, should retry fresh
+RESP=$(post /send-message "{\"channelId\":\"$BAD_CHAN\",\"content\":\"are you there?\"}")
+RESUMED=$(jq_val "$RESP" "['resumed']")
+assert_eq "resumed after bad session" "True" "$RESUMED"
+
+# Verify channel is running
+SESSIONS=$(get /sessions)
+BAD_STATUS=""
+for i in 0 1 2 3 4 5 6 7 8 9; do
+  S=$(jq_val "$SESSIONS" "['channels'][$i]['channelId']" 2>/dev/null)
+  if [[ "$S" == "$BAD_CHAN" ]]; then
+    BAD_STATUS=$(jq_val "$SESSIONS" "['channels'][$i]['status']")
+    break
+  fi
+done
+assert_eq "channel running after bad resume retry" "running" "$BAD_STATUS"
+
+# Clean up
+post /delete-channel "{\"channelId\":\"$BAD_CHAN\"}" >/dev/null
+sleep 1
+echo ""
+
+# ═══════════════════════════════════════
+# Test 12: Restart recovery for ended channels
+# ═══════════════════════════════════════
+echo -e "${YELLOW}Test 12: Restart recovery for ended channels${NC}"
+
+# Create a channel
+RESP=$(post /create-channel '{"name":"afk-ended"}')
+ENDED_CHAN=$(jq_val "$RESP" "['channelId']")
+assert_contains "channel created" "mock-chan" "$ENDED_CHAN"
+sleep 3
+
+# Get the session ID before we force it to ended
+ENDED_SESS=$(jq_val "$(get /sessions)" "['channels'][0]['sessionId']" 2>/dev/null)
+
+# Force channel to 'ended' state (simulates what happened to the user)
+RESP=$(post /set-channel-state "{\"channelId\":\"$ENDED_CHAN\",\"status\":\"ended\"}")
+assert_eq "forced to ended" "ended" "$(jq_val "$RESP" "['status']")"
+
+# Wait for persistence (debounced at 100ms)
+sleep 1
+
+# Kill the tmux session so it looks like a cold restart
+if [[ -n "$ENDED_SESS" ]] && tmux has-session -t "afk-$ENDED_SESS" 2>/dev/null; then
+  tmux kill-session -t "afk-$ENDED_SESS" 2>/dev/null || true
+fi
+
+# SIGKILL the mock (simulates restart)
+kill -9 "$MOCK_PID" 2>/dev/null || true
+wait "$MOCK_PID" 2>/dev/null || true
+MOCK_PID=""
+sleep 1
+
+# Clean up stale socket and restart
+rm -f ~/.afk-code/daemon.sock 2>/dev/null
+node dist/cli/index.js discord --mock-discord &>/dev/null &
+MOCK_PID=$!
+sleep 5
+
+if ! kill -0 "$MOCK_PID" 2>/dev/null; then
+  echo -e "  ${RED}FAIL${NC} mock server failed to restart for ended recovery test"
+  ((FAIL++))
+else
+  # Verify the ended channel was restored to running
+  SESSIONS=$(get /sessions)
+  ENDED_STATUS=""
+  for i in 0 1 2 3 4 5 6 7 8 9; do
+    S=$(jq_val "$SESSIONS" "['channels'][$i]['channelId']" 2>/dev/null)
+    if [[ "$S" == "$ENDED_CHAN" ]]; then
+      ENDED_STATUS=$(jq_val "$SESSIONS" "['channels'][$i]['status']")
+      break
+    fi
+  done
+  assert_eq "ended channel restored to running" "running" "$ENDED_STATUS"
+
+  # Wait for the restored session to be fully ready
+  sleep 3
+
+  # Verify we can send a message to it
+  RESP=$(post /send-message "{\"channelId\":\"$ENDED_CHAN\",\"content\":\"alive after ended?\"}")
+  OK=$(jq_val "$RESP" "['ok']")
+  assert_eq "send to restored channel" "True" "$OK"
+
+  # Clean up
+  post /delete-channel "{\"channelId\":\"$ENDED_CHAN\"}" >/dev/null
+fi
+echo ""
+
+# ═══════════════════════════════════════
 # Summary
 # ═══════════════════════════════════════
 TOTAL=$((PASS + FAIL))

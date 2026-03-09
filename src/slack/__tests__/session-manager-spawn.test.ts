@@ -1,7 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sanitizePtyInput } from '../../utils/sanitize.js';
 import { getClaudeProjectDir } from '../../utils/claude-paths.js';
-import { homedir } from 'os';
+import { homedir, tmpdir } from 'os';
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync } from 'fs';
+import { join } from 'path';
 
 describe('Session Manager - getClaudeProjectDir', () => {
   it('encodes paths by replacing / with -', () => {
@@ -17,6 +19,32 @@ describe('Session Manager - getClaudeProjectDir', () => {
   it('handles deeply nested paths', () => {
     const result = getClaudeProjectDir('/home/user/projects/my/deep/path');
     expect(result).toBe(`${homedir()}/.claude/projects/-home-user-projects-my-deep-path`);
+  });
+
+  it('resolves symlinks to real path', () => {
+    // Create a real directory and a symlink to it
+    const tempDir = mkdtempSync(join(tmpdir(), 'afk-test-'));
+    const realDir = join(tempDir, 'real-project');
+    const linkDir = join(tempDir, 'link-project');
+    mkdirSync(realDir);
+    symlinkSync(realDir, linkDir);
+
+    try {
+      const fromReal = getClaudeProjectDir(realDir);
+      const fromLink = getClaudeProjectDir(linkDir);
+      // Both should resolve to the same project dir
+      expect(fromLink).toBe(fromReal);
+      // Should use the real path, not the symlink
+      expect(fromReal).toContain('real-project');
+      expect(fromReal).not.toContain('link-project');
+    } finally {
+      rmSync(tempDir, { recursive: true });
+    }
+  });
+
+  it('falls back to original path if symlink resolution fails', () => {
+    const result = getClaudeProjectDir('/nonexistent/path/that/does/not/exist');
+    expect(result).toBe(`${homedir()}/.claude/projects/-nonexistent-path-that-does-not-exist`);
   });
 });
 
