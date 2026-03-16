@@ -198,8 +198,8 @@ Start the mock server with `npm run build && node dist/cli/index.js discord --mo
 
 ## Limitations
 
-- Does not support plan mode or responding to Claude Code's form-based questions (AskUserQuestion)
-  - You can bypass this using the `/mode` command or by sending any message
+- Plan mode works: form-based questions (AskUserQuestion) are rendered in chat and auto-dismissed so Claude re-asks as plain text you can reply to
+  - Use the `/mode` command to toggle plan mode on/off
 - Does not send tool calls or results (would encounter rate limits)
 
 ## Disclaimer

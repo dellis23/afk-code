@@ -198,6 +198,28 @@ export function createTelegramApp(config: TelegramConfig) {
 
       await sendMessage(`_Claude Code:_ ${status}`);
     },
+
+    onAskUserQuestion: async (sessionId, questions) => {
+      const tracking = activeSessions.get(sessionId);
+      if (!tracking) return;
+
+      let text = '❓ *Claude is asking:*\n\n';
+      for (const q of questions) {
+        if (q.header) text += `*${q.header}:* `;
+        text += `${q.question}\n`;
+        if (q.options?.length) {
+          for (const opt of q.options) {
+            text += `  • *${opt.label}*`;
+            if (opt.description) text += ` — ${opt.description}`;
+            text += '\n';
+          }
+        }
+        text += '\n';
+      }
+      text += '_Reply to answer — Claude will re-ask as plain text._';
+
+      await sendMessage(text);
+    },
   });
 
   function getCurrentSession(): SessionTracking | null {

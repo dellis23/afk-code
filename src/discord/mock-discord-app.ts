@@ -139,6 +139,20 @@ export function createMockDiscordApp(port: number) {
         log(channel.channelId, inPlanMode ? '📋 Plan mode active' : '🔨 Execution mode');
       }
     },
+
+    onAskUserQuestion: async (sessionId, questions) => {
+      const channel = store?.getBySession(sessionId);
+      if (!channel) return;
+      let text = '❓ Claude is asking:\n';
+      for (const q of questions) {
+        text += `  ${q.header ? q.header + ': ' : ''}${q.question}`;
+        if (q.options?.length) {
+          text += ' [' + q.options.map(o => o.label).join(', ') + ']';
+        }
+        text += '\n';
+      }
+      log(channel.channelId, text.trim());
+    },
   });
 
   const server = createServer(async (req, res) => {

@@ -59,6 +59,18 @@ export interface ToolResultInfo {
   isError: boolean;
 }
 
+export interface AskUserQuestionOption {
+  label: string;
+  description?: string;
+}
+
+export interface AskUserQuestionItem {
+  header?: string;
+  question: string;
+  options?: AskUserQuestionOption[];
+  multiSelect?: boolean;
+}
+
 export interface SessionEvents {
   onSessionStart: (session: SessionInfo) => void;
   onSessionEnd: (sessionId: string) => void;
@@ -69,6 +81,7 @@ export interface SessionEvents {
   onToolCall: (sessionId: string, tool: ToolCallInfo) => void;
   onToolResult: (sessionId: string, result: ToolResultInfo) => void;
   onPlanModeChange: (sessionId: string, inPlanMode: boolean) => void;
+  onAskUserQuestion: (sessionId: string, questions: AskUserQuestionItem[]) => void;
 }
 
 function hash(data: string): string {
@@ -772,6 +785,16 @@ export class SessionManager {
         const toolCalls = this.extractToolCalls(line);
         for (const tool of toolCalls) {
           this.events.onToolCall(session.id, tool);
+
+          // Detect AskUserQuestion: render questions in chat, then send Escape
+          // to dismiss the TUI form. Claude falls back to asking as plain text.
+          if (tool.name === 'AskUserQuestion' && Array.isArray(tool.input?.questions)) {
+            this.events.onAskUserQuestion(session.id, tool.input.questions);
+            // Delay to ensure the TUI form is rendered before we dismiss it
+            setTimeout(() => {
+              this.sendInput(session.id, '\x1b', true);
+            }, 500);
+          }
         }
 
         // Extract tool results from user messages

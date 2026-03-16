@@ -241,6 +241,38 @@ export function createSlackApp(config: SlackConfig) {
         console.error('[Slack] Failed to post plan mode change:', err);
       }
     },
+
+    onAskUserQuestion: async (sessionId, questions) => {
+      const channel = channelManager.getChannel(sessionId);
+      if (!channel) return;
+
+      let text = ':question: *Claude is asking:*\n\n';
+      for (const q of questions) {
+        if (q.header) text += `*${q.header}:* `;
+        text += `${q.question}\n`;
+        if (q.options?.length) {
+          for (const opt of q.options) {
+            text += `  • *${opt.label}*`;
+            if (opt.description) text += ` — ${opt.description}`;
+            text += '\n';
+          }
+        }
+        text += '\n';
+      }
+      text += '_Reply here to answer — Claude will re-ask as plain text._';
+
+      try {
+        await messageQueue.add(() =>
+          app.client.chat.postMessage({
+            channel: channel.channelId,
+            text,
+            mrkdwn: true,
+          })
+        );
+      } catch (err) {
+        console.error('[Slack] Failed to post AskUserQuestion:', err);
+      }
+    },
   });
 
   // Handle messages in session channels (user sending input to Claude)

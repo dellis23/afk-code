@@ -434,6 +434,35 @@ export function createDiscordApp(config: DiscordConfig) {
         console.error('[Discord] Failed to post plan mode change:', err);
       }
     },
+
+    onAskUserQuestion: async (sessionId, questions) => {
+      const channel = store?.getBySession(sessionId);
+      if (!channel) return;
+
+      let text = '❓ **Claude is asking:**\n\n';
+      for (const q of questions) {
+        if (q.header) text += `**${q.header}:** `;
+        text += `${q.question}\n`;
+        if (q.options?.length) {
+          for (const opt of q.options) {
+            text += `> • **${opt.label}**`;
+            if (opt.description) text += ` — ${opt.description}`;
+            text += '\n';
+          }
+        }
+        text += '\n';
+      }
+      text += '_Reply here to answer — Claude will re-ask as plain text._';
+
+      try {
+        const discordChannel = await client.channels.fetch(channel.channelId);
+        if (discordChannel?.type === ChannelType.GuildText) {
+          await discordChannel.send(text);
+        }
+      } catch (err) {
+        console.error('[Discord] Failed to post AskUserQuestion:', err);
+      }
+    },
   });
 
   // Download a Discord attachment to ~/.afk-code/attachments/ and return the local path
