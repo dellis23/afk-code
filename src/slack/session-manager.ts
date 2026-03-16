@@ -33,7 +33,8 @@ interface InternalSession extends SessionInfo {
   pty?: IPty;         // present for locally-spawned sessions
   watcher?: FSWatcher;
   watchedFile?: string;
-  seenMessages: Set<string>;
+  jsonlOffset: number;
+  resumed: boolean; // true if session was spawned with --resume
   slugFound: boolean;
   lastTodosHash: string;
   inPlanMode: boolean;
@@ -212,7 +213,8 @@ export class SessionManager {
       projectDir,
       pty: ptyProcess,
       status: 'running',
-      seenMessages: new Set(),
+      jsonlOffset: 0,
+      resumed: !!options?.resumeSessionId,
       startedAt: new Date(),
       slugFound: false,
       lastTodosHash: '',
@@ -296,7 +298,8 @@ export class SessionManager {
       projectDir,
       pty: ptyProcess,
       status: 'running',
-      seenMessages: new Set(),
+      jsonlOffset: 0,
+      resumed: false,
       startedAt: new Date(0), // epoch so we don't skip existing messages
       slugFound: false,
       lastTodosHash: '',
@@ -343,7 +346,7 @@ export class SessionManager {
       // findActiveJsonlFile. Only clear the watchedFile reference so the
       // watcher/poll picks up the next new unclaimed file.
       session.watchedFile = undefined;
-      session.seenMessages.clear();
+      session.jsonlOffset = 0;
       session.slugFound = false;
 
       // Re-snapshot all existing JSONL files so findActiveJsonlFile treats
@@ -588,7 +591,8 @@ export class SessionManager {
           projectDir: message.projectDir,
           socket,
           status: 'running',
-          seenMessages: new Set(),
+          jsonlOffset: 0,
+          resumed: false,
           startedAt: new Date(),
           slugFound: false,
           lastTodosHash: '',
@@ -725,32 +729,15 @@ export class SessionManager {
 
     try {
       const content = await readFile(session.watchedFile, 'utf-8');
-      const lines = content.split('\n').filter(Boolean);
+
+      // Skip content we've already processed
+      if (content.length <= session.jsonlOffset) return;
+      const newContent = content.slice(session.jsonlOffset);
+      session.jsonlOffset = content.length;
+
+      const lines = newContent.split('\n').filter(Boolean);
 
       for (const line of lines) {
-        const lineHash = hash(line);
-        if (session.seenMessages.has(lineHash)) continue;
-        session.seenMessages.add(lineHash);
-
-        // Skip lines older than session start (avoid replaying history on --resume)
-        // Always extract slug/name regardless of timestamp so the channel gets named
-        try {
-          const data = JSON.parse(line);
-          if (data.timestamp) {
-            const lineTime = new Date(data.timestamp);
-            if (lineTime < session.startedAt) {
-              // Still extract slug from old lines so channel name is set
-              if (!session.slugFound && data.slug) {
-                session.slugFound = true;
-                session.name = data.slug;
-                this.events.onSessionUpdate(session.id, data.slug);
-              }
-              continue;
-            }
-          }
-        } catch {
-          // Not valid JSON — skip timestamp check, process normally
-        }
 
         // Extract session name (slug)
         if (!session.slugFound) {
@@ -820,7 +807,21 @@ export class SessionManager {
     if (jsonlFile) {
       session.watchedFile = jsonlFile;
       console.log(`[SessionManager] Session ${session.id}: watching ${jsonlFile}`);
-      await this.processJsonlUpdates(session);
+
+      if (session.resumed) {
+        // For resumed sessions, skip existing content to avoid replaying history.
+        // Extract the slug from the existing content first so the channel gets named.
+        const existingContent = await readFile(jsonlFile, 'utf-8');
+        session.jsonlOffset = existingContent.length;
+        const slug = await this.extractSlugFromFile(jsonlFile);
+        if (slug) {
+          session.slugFound = true;
+          session.name = slug;
+          this.events.onSessionUpdate(session.id, slug);
+        }
+      } else {
+        await this.processJsonlUpdates(session);
+      }
     } else {
       console.log(`[SessionManager] Session ${session.id}: waiting for JSONL in ${session.projectDir}`);
     }
@@ -878,7 +879,7 @@ export class SessionManager {
             session.previousWatchedFiles.add(session.watchedFile);
             this.claimedFiles.delete(session.watchedFile);
             session.watchedFile = successor;
-            session.seenMessages.clear();
+            session.jsonlOffset = 0;
             await this.processJsonlUpdates(session);
           }
         }

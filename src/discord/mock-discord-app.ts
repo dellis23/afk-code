@@ -39,6 +39,9 @@ export function createMockDiscordApp(port: number) {
   let store: ChannelStore;
   let channelCounter = 0;
 
+  // Track all messages sent per channel for test assertions
+  const messageLog = new Map<string, Array<{ role: string; content: string; timestamp: number }>>();
+
   function channelName(channelId: string): string {
     return store?.get(channelId)?.channelName || channelId;
   }
@@ -86,6 +89,12 @@ export function createMockDiscordApp(port: number) {
         store.setClaudeSessionId(channel.channelId, claudeId);
         console.log(`[mock-discord] Persisted Claude session UUID: ${claudeId} for channel ${channel.channelId}`);
       }
+
+      // Track messages for test assertions
+      if (!messageLog.has(channel.channelId)) {
+        messageLog.set(channel.channelId, []);
+      }
+      messageLog.get(channel.channelId)!.push({ role, content, timestamp: Date.now() });
 
       if (role === 'user') {
         log(channel.channelId, `[user] ${content.slice(0, 200)}`);
@@ -455,6 +464,16 @@ export function createMockDiscordApp(port: number) {
           status: updated?.status,
           claudeSessionId: updated?.claudeSessionId,
         });
+      }
+
+      if (req.method === 'GET' && url?.startsWith('/messages')) {
+        const params = new URL(url, 'http://localhost').searchParams;
+        const channelId = params.get('channelId');
+        if (!channelId) {
+          return json(res, 400, { error: 'Missing "channelId" query parameter' });
+        }
+        const messages = messageLog.get(channelId) || [];
+        return json(res, 200, { channelId, count: messages.length, messages });
       }
 
       if (req.method === 'GET' && (url === '/sessions' || url === '/sessions?all=true')) {

@@ -190,6 +190,54 @@ assert_eq "channel running after second resume" "running" "$CHAN_STATUS"
 echo ""
 
 # ═══════════════════════════════════════
+# Test 6b: No message replay after resume
+# ═══════════════════════════════════════
+echo -e "${YELLOW}Test 6b: No message replay after resume${NC}"
+sleep 5  # let JSONL watcher settle after second resume
+
+# Count messages received so far
+MSG_RESP=$(get "/messages?channelId=$CHAN_ID")
+MSG_COUNT_BEFORE=$(jq_val "$MSG_RESP" "['count']")
+echo -e "  Messages before archive: $MSG_COUNT_BEFORE"
+
+# Archive
+RESP=$(post /command "{\"channelId\":\"$CHAN_ID\",\"command\":\"archive\"}")
+assert_contains "archive for replay test" "archived" "$RESP"
+sleep 2
+
+# Resume
+RESP=$(post /send-message "{\"channelId\":\"$CHAN_ID\",\"content\":\"replay test\"}")
+RESUMED=$(jq_val "$RESP" "['resumed']")
+assert_eq "resumed for replay test" "True" "$RESUMED"
+sleep 8  # give JSONL watcher time to process
+
+# Count messages after resume — should have grown by at most a small number
+# (the resume message itself, maybe a status), NOT a replay of all history
+MSG_RESP=$(get "/messages?channelId=$CHAN_ID")
+MSG_COUNT_AFTER=$(jq_val "$MSG_RESP" "['count']")
+echo -e "  Messages after resume: $MSG_COUNT_AFTER"
+
+NEW_MESSAGES=$((MSG_COUNT_AFTER - MSG_COUNT_BEFORE))
+echo -e "  New messages after resume: $NEW_MESSAGES"
+
+# If we replayed history, we'd see the count roughly double.
+# Allow up to 10 new messages for legitimate new activity (session start, status, etc.)
+if [[ $NEW_MESSAGES -le 10 ]]; then
+  echo -e "  ${GREEN}PASS${NC} no message replay ($NEW_MESSAGES new messages)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC} message replay detected ($NEW_MESSAGES new messages after resume, expected <= 10)"
+  FAIL=$((FAIL + 1))
+fi
+
+# Clean up: archive so test 7 can proceed with a running channel
+RESP=$(post /command "{\"channelId\":\"$CHAN_ID\",\"command\":\"archive\"}")
+sleep 2
+RESP=$(post /send-message "{\"channelId\":\"$CHAN_ID\",\"content\":\"cleanup resume\"}")
+sleep 3
+echo ""
+
+# ═══════════════════════════════════════
 # Test 7: Change topic
 # ═══════════════════════════════════════
 echo -e "${YELLOW}Test 7: Change topic${NC}"
