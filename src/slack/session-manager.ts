@@ -299,7 +299,7 @@ export class SessionManager {
       pty: ptyProcess,
       status: 'running',
       jsonlOffset: 0,
-      resumed: false,
+      resumed: true, // skip existing JSONL content — it was already sent before restart
       startedAt: new Date(0), // epoch so we don't skip existing messages
       slugFound: false,
       lastTodosHash: '',
