@@ -284,9 +284,9 @@ export function createMockDiscordApp(port: number) {
           }
         }
 
-        // Check if channel is archived — re-spawn session
+        // Check if channel is archived or ended — re-spawn session
         const channel = store.get(channelId);
-        if (channel?.status === 'archived') {
+        if (channel?.status === 'archived' || channel?.status === 'ended') {
           store.transition(channelId, 'resuming');
 
           const cwd = channel.cwd;

@@ -230,11 +230,44 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# Clean up: archive so test 7 can proceed with a running channel
+# Clean up: archive so test 6c can proceed with a running channel
 RESP=$(post /command "{\"channelId\":\"$CHAN_ID\",\"command\":\"archive\"}")
 sleep 2
 RESP=$(post /send-message "{\"channelId\":\"$CHAN_ID\",\"content\":\"cleanup resume\"}")
 sleep 3
+echo ""
+
+# ═══════════════════════════════════════
+# Test 6c: No message replay after /clear
+# ═══════════════════════════════════════
+echo -e "${YELLOW}Test 6c: No message replay after /clear${NC}"
+sleep 5  # let JSONL watcher settle
+
+# Count messages before /clear
+MSG_RESP=$(get "/messages?channelId=$CHAN_ID")
+MSG_COUNT_BEFORE=$(jq_val "$MSG_RESP" "['count']")
+echo -e "  Messages before /clear: $MSG_COUNT_BEFORE"
+
+# Send /clear
+RESP=$(post /command "{\"channelId\":\"$CHAN_ID\",\"command\":\"clear\"}")
+assert_contains "clear sent" "ok" "$RESP"
+sleep 8  # give JSONL watcher time to find new file
+
+# Count messages after /clear
+MSG_RESP=$(get "/messages?channelId=$CHAN_ID")
+MSG_COUNT_AFTER=$(jq_val "$MSG_RESP" "['count']")
+echo -e "  Messages after /clear: $MSG_COUNT_AFTER"
+
+NEW_MESSAGES=$((MSG_COUNT_AFTER - MSG_COUNT_BEFORE))
+echo -e "  New messages after /clear: $NEW_MESSAGES"
+
+if [[ $NEW_MESSAGES -le 10 ]]; then
+  echo -e "  ${GREEN}PASS${NC} no message replay after /clear ($NEW_MESSAGES new messages)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC} message replay detected after /clear ($NEW_MESSAGES new messages, expected <= 10)"
+  FAIL=$((FAIL + 1))
+fi
 echo ""
 
 # ═══════════════════════════════════════
@@ -430,6 +463,50 @@ else
   # Clean up
   post /delete-channel "{\"channelId\":\"$ENDED_CHAN\"}" >/dev/null
 fi
+echo ""
+
+# ═══════════════════════════════════════
+# Test 13: Resume from ended state (send message)
+# ═══════════════════════════════════════
+echo -e "${YELLOW}Test 13: Resume from ended state${NC}"
+
+# Create a channel
+RESP=$(post /create-channel '{"name":"afk-ended-resume"}')
+ENDED_RESUME_CHAN=$(jq_val "$RESP" "['channelId']")
+assert_contains "channel created" "mock-chan" "$ENDED_RESUME_CHAN"
+sleep 3
+
+# Force channel to 'ended' state and kill the session
+ENDED_RESUME_SESS=$(jq_val "$(get /sessions)" "['channels'][0]['sessionId']" 2>/dev/null)
+RESP=$(post /set-channel-state "{\"channelId\":\"$ENDED_RESUME_CHAN\",\"status\":\"ended\"}")
+assert_eq "forced to ended" "ended" "$(jq_val "$RESP" "['status']")"
+
+# Kill the tmux session
+if [[ -n "$ENDED_RESUME_SESS" ]] && tmux has-session -t "afk-$ENDED_RESUME_SESS" 2>/dev/null; then
+  tmux kill-session -t "afk-$ENDED_RESUME_SESS" 2>/dev/null || true
+fi
+sleep 1
+
+# Send a message — should resume instead of showing "session has ended"
+RESP=$(post /send-message "{\"channelId\":\"$ENDED_RESUME_CHAN\",\"content\":\"are you back?\"}")
+RESUMED=$(jq_val "$RESP" "['resumed']")
+assert_eq "resumed from ended" "True" "$RESUMED"
+
+# Verify channel is running
+SESSIONS=$(get /sessions)
+ENDED_RESUME_STATUS=""
+for i in 0 1 2 3 4 5 6 7 8 9; do
+  S=$(jq_val "$SESSIONS" "['channels'][$i]['channelId']" 2>/dev/null)
+  if [[ "$S" == "$ENDED_RESUME_CHAN" ]]; then
+    ENDED_RESUME_STATUS=$(jq_val "$SESSIONS" "['channels'][$i]['status']")
+    break
+  fi
+done
+assert_eq "channel running after resume from ended" "running" "$ENDED_RESUME_STATUS"
+
+# Clean up
+post /delete-channel "{\"channelId\":\"$ENDED_RESUME_CHAN\"}" >/dev/null
+sleep 1
 echo ""
 
 # ═══════════════════════════════════════

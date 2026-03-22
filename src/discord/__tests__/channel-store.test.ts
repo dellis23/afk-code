@@ -67,6 +67,10 @@ describe('ChannelStore — state transitions', () => {
     expect(store.transition('chan-1', 'running')).toBe(true);
     // running → ended
     expect(store.transition('chan-1', 'ended')).toBe(true);
+    // ended → resuming (resume on message)
+    expect(store.transition('chan-1', 'resuming')).toBe(true);
+    // resuming → running
+    expect(store.transition('chan-1', 'running')).toBe(true);
   });
 
   it('invalid transitions fail', () => {

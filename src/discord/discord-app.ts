@@ -488,10 +488,7 @@ export function createDiscordApp(config: DiscordConfig) {
     const channel = store?.get(message.channelId);
     if (!channel) return; // Not a session channel
 
-    if (channel.status === 'ended') {
-      await message.reply('⚠️ This session has ended.');
-      return;
-    }
+    try {
 
     // Build full message content (with attachments)
     let fullContent = message.content;
@@ -512,8 +509,8 @@ export function createDiscordApp(config: DiscordConfig) {
       }
     }
 
-    // Re-spawn archived sessions on message
-    if (channel.status === 'archived') {
+    // Re-spawn archived or ended sessions on message
+    if (channel.status === 'archived' || channel.status === 'ended') {
       store.queueMessage(message.channelId, fullContent);
 
       // If already resuming, just queue and return
@@ -577,6 +574,9 @@ export function createDiscordApp(config: DiscordConfig) {
     if (!sent) {
       discordSentMessages.delete(fullContent.trim());
       await message.reply('⚠️ Failed to send input - session not connected.');
+    }
+    } catch (err) {
+      console.error(`[Discord] Error handling message in #${channel.channelName}:`, err);
     }
   });
 
@@ -775,6 +775,7 @@ export function createDiscordApp(config: DiscordConfig) {
   client.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
 
+    try {
     if (interaction.user.id !== config.userId) {
       await interaction.reply({ content: '\u26a0\ufe0f You are not authorized to use this command.', ephemeral: true });
       return;
@@ -804,7 +805,7 @@ export function createDiscordApp(config: DiscordConfig) {
         return;
       }
       if (channel.status === 'ended') {
-        await interaction.reply('⚠️ This session has ended.');
+        await interaction.reply('⚠️ This session has ended. Send a message to resume.');
         return;
       }
 
@@ -836,7 +837,7 @@ export function createDiscordApp(config: DiscordConfig) {
         return;
       }
       if (channel.status === 'ended') {
-        await interaction.reply('⚠️ This session has ended.');
+        await interaction.reply('⚠️ This session has ended. Send a message to resume.');
         return;
       }
 
@@ -855,7 +856,7 @@ export function createDiscordApp(config: DiscordConfig) {
         return;
       }
       if (channel.status === 'ended') {
-        await interaction.reply('⚠️ This session has ended.');
+        await interaction.reply('⚠️ This session has ended. Send a message to resume.');
         return;
       }
 
@@ -875,7 +876,7 @@ export function createDiscordApp(config: DiscordConfig) {
         return;
       }
       if (channel.status === 'ended') {
-        await interaction.reply('⚠️ This session has ended.');
+        await interaction.reply('⚠️ This session has ended. Send a message to resume.');
         return;
       }
 
@@ -948,7 +949,7 @@ export function createDiscordApp(config: DiscordConfig) {
         return;
       }
       if (channel.status === 'ended') {
-        await interaction.reply('⚠️ This session has ended.');
+        await interaction.reply('⚠️ This session has ended. Send a message to resume.');
         return;
       }
 
@@ -970,6 +971,9 @@ export function createDiscordApp(config: DiscordConfig) {
 
       await interaction.reply('📦 **Session archived.** Send a message here to resume.');
       sessionManager.killSession(sessionIdToKill);
+    }
+    } catch (err) {
+      console.error(`[Discord] Error handling /${interaction.commandName}:`, err);
     }
   });
 

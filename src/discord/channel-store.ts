@@ -30,7 +30,7 @@ const TRANSITIONS: Record<ChannelStatus, Set<ChannelStatus>> = {
   idle:     new Set(['running', 'archived', 'ended']),
   archived: new Set(['resuming', 'ended']),
   resuming: new Set(['running', 'archived', 'ended']),
-  ended:    new Set(['spawning']),
+  ended:    new Set(['spawning', 'resuming']),
 };
 
 interface PersistedChannel {
